@@ -158,7 +158,7 @@ function toggleAlbumSelection(album) { setVideos(album.selectionVideos.map((vide
 const modeOptions = [
   { id: 'video', label: '下载视频', icon: Film },
   { id: 'audio', label: '下载音频', icon: AudioLines },
-  { id: 'transcript', label: '转写文字稿', icon: FileText, disabled: true },
+  { id: 'transcript', label: '转写文字稿', icon: FileText },
 ]
 const taskNames = { video: '视频下载', audio: '音频下载', transcript: '文字稿转写' }
 const taskIcon = { video: Film, audio: AudioLines, transcript: FileText }
@@ -194,9 +194,10 @@ async function refreshTasks() {
     if (!response.ok) throw new Error('任务列表读取失败')
     const result = await response.json()
     tasks.value = result.tasks || []
-    if (result.downloadDirectory && !settingsDirty.value) {
-      downloadPath.value = result.downloadDirectory
-      savedDownloadPath.value = result.downloadDirectory
+    const completedTranscripts = tasks.value.filter((task) => task.mode === 'transcript' && task.status === 'completed').map((task) => task.id).join(',')
+    if (completedTranscripts !== transcriptTaskSignature) {
+      transcriptTaskSignature = completedTranscripts
+      await refreshTranscriptLibrary()
     }
     return true
   } catch {
@@ -205,7 +206,7 @@ async function refreshTasks() {
 }
 
 async function addSingleTask(mode = batchAction.value) {
-  if (!['video', 'audio'].includes(mode) || !singleVideo.value.bvid) return
+  if (!['video', 'audio', 'transcript'].includes(mode) || !singleVideo.value.bvid) return
   try {
     const response = await fetch('/api/tasks', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -222,7 +223,7 @@ async function addSingleTask(mode = batchAction.value) {
 }
 
 async function createBatchTasks() {
-  if (!['video', 'audio'].includes(batchAction.value)) return
+  if (!['video', 'audio', 'transcript'].includes(batchAction.value)) return
   const selected = (creatorData.value?.videos || []).filter((video) => selectedVideoIds.value.has(video.id))
   if (!selected.length) return
   try {
@@ -249,7 +250,7 @@ async function cancelTask(task) {
     const result = await response.json()
     if (!response.ok) throw new Error(result.error?.message || '取消任务失败。')
     await refreshTasks()
-    notify('已请求取消，队列会继续执行')
+    notify(task.mode === 'transcript' ? '已请求取消转写，队列会继续执行' : '已请求取消，队列会继续执行')
   } catch (error) { notify(error.message || '取消任务失败。') }
 }
 const confirmation = ref(null)
@@ -309,27 +310,34 @@ function hideLoginAvatar() {
   if (loginAccount.value) loginAccount.value = { ...loginAccount.value, avatar: '' }
 }
 
-const transcriptText = `今天我们先从最基础的地方开始讲，拿到一个八字，不要着急去判断这个人好还是不好。我们先把四柱摆清楚，年柱、月柱、日柱、时柱，每一个位置都代表不同的信息。\n\n日柱的天干是日主，也就是我们接下来分析时的中心。其他的天干地支，都是围绕日主来看的。你先记住这个顺序：先认日主，再看月令，然后看整个命局里面五行之间怎么流通。\n\n这个地方我们先不要急着下结论。看到一个五行多，不代表它一定就是好，也不能直接说少的那个就一定不好。还是要回到原局，看它在什么位置，跟其他干支是什么关系。我们学习的时候一步一步来，先把每个字认清楚，再慢慢把它们连起来。\n\n比如说现在这个盘，日主是甲木，我们先看月令是不是对它有帮助，再看地支里面有没有根，天干上有没有同类帮扶。这里说的旺衰，是一个基础的观察方法，不是最后的答案。后面我们还要结合十神、组合关系和大运流年来看。\n\n再往下看月令，月令是我们观察季节气候的一个入口。甲木生在不同的月份，它周围的环境不一样，不能拿同一把尺子直接量。看到这里，大家可以先停一下，把月支圈出来，想一想这个季节里面木的状态是什么。先说你看见了什么，再说它对日主有什么影响。\n\n地支里面还有藏干，所以一个地支不能只看表面那个字。我们把藏干写出来以后，再看这些字跟日主之间是什么关系。这个时候十神的概念就可以慢慢用起来了。刚开始记不住没有关系，我们先用表格查，重复几次以后，自然就熟悉了。\n\n大家容易遇到的一个问题，就是只盯着某一个字看。比如说看到一个冲，就马上觉得一定发生什么事情；看到一个合，就马上觉得它们都合住了。实际分析的时候，要把位置、力量和其他关系一起摆出来。现在先不用记复杂判断，我们先把每一步看完整。\n\n做案例的时候，先不要看答案。你按顺序把四柱写出来，标好阴阳和五行，再找日主和月令，最后把天干地支之间的关系连起来。把你看到的写在纸上，然后对照讲解，看看自己在哪一步漏了。这样练，比一上来背结论更有用。\n\n大家做练习的时候，可以先把四柱写出来，在旁边标上每个字的五行和阴阳。刚开始慢一点没有关系，把基础的步骤做对，后面分析才不会乱。今天这节课先到这里，下一节我们接着讲十天干的特点。`
-const transcripts = ref([
-  { id: 'tr-1', title: '八字入门第一课：四柱与五行基础概念', creator: '山间命理课', date: '2026-09-18', duration: '18:42', text: transcriptText },
-  { id: 'tr-2', title: '十神是什么？日主与其他天干的关系', creator: '山间命理课', date: '2026-09-06', duration: '21:36', text: transcriptText.replaceAll('日主', '日元') },
-  { id: 'tr-3', title: '排盘的基本方法：四柱怎么排', creator: '山间命理课', date: '2026-09-12', duration: '32:08', text: transcriptText.replaceAll('月令', '月支') },
-])
-const activeTranscriptId = ref('tr-1')
+const transcripts = ref([])
+const activeTranscriptId = ref('')
 const transcriptQuery = ref('')
 const visibleTranscripts = computed(() => transcripts.value.filter((item) => `${item.title} ${item.creator}`.toLowerCase().includes(transcriptQuery.value.trim().toLowerCase())))
-const activeTranscript = computed(() => transcripts.value.find((item) => item.id === activeTranscriptId.value) || transcripts.value[0])
-function addTranscript(task) {
-  const id = `tr-${Date.now()}`
-  transcripts.value.unshift({ id, title: task.title, creator: task.owner, date: new Date().toLocaleDateString('zh-CN'), duration: '18:42', text: transcriptText })
+const activeTranscript = computed(() => transcripts.value.find((item) => item.id === activeTranscriptId.value) || transcripts.value[0] || null)
+let transcriptTaskSignature = ''
+async function refreshTranscriptLibrary() {
+  try {
+    const response = await fetch('/api/transcripts')
+    if (!response.ok) return
+    const result = await response.json()
+    transcripts.value = result.transcripts || []
+    if (!transcripts.value.some((item) => item.id === activeTranscriptId.value)) activeTranscriptId.value = transcripts.value[0]?.id || ''
+  } catch { /* library appears when local service is available */ }
+}
+function formatTranscriptDate(value) {
+  const date = new Date(value)
+  return Number.isNaN(date.getTime()) ? '—' : date.toLocaleDateString('zh-CN')
 }
 async function copyTranscript() {
+  if (!activeTranscript.value) return
   try {
     await navigator.clipboard.writeText(activeTranscript.value.text)
     notify('全文已复制')
   } catch { notify('浏览器未授权剪贴板，请手动选择正文复制') }
 }
 function exportTranscript() {
+  if (!activeTranscript.value) return
   const file = new Blob([activeTranscript.value.text], { type: 'text/plain;charset=utf-8' })
   const downloadUrl = URL.createObjectURL(file)
   const link = document.createElement('a')
@@ -360,14 +368,17 @@ const qrStatusLabel = computed(() => ({
 const confirmationDialog = computed(() => !!confirmation.value)
 const apiKey = ref('')
 const showApiKey = ref(false)
-const savedApiKey = ref('')
+const apiKeyConfigured = ref(false)
+const apiKeyMask = ref('')
 const apiTesting = ref(false)
 const apiTested = ref(false)
+const settingsSaved = ref(false)
 const downloadPath = ref('')
-const transcriptPath = ref('D:\\BiliScribe\\文字稿')
-const savedDownloadPath = ref(downloadPath.value)
-const savedTranscriptPath = ref(transcriptPath.value)
-const settingsDirty = computed(() => apiKey.value !== savedApiKey.value || downloadPath.value !== savedDownloadPath.value || transcriptPath.value !== savedTranscriptPath.value)
+const transcriptPath = ref('')
+let settingsSaveTimer
+let settingsSavedTimer
+let settingsSaveQueue = Promise.resolve()
+let settingsReady = false
 const backendStatus = ref('connecting')
 const bbdownAvailable = ref(null)
 const bbdownVersion = ref('')
@@ -375,21 +386,67 @@ const logPath = ref('项目目录/logs/biliscribe.log')
 const logAvailable = ref(false)
 const logLineCount = ref(0)
 const logLoading = ref(false)
-async function saveSettings() {
+async function refreshSettings() {
   try {
-    const response = await fetch('/api/settings/download', {
+    const response = await fetch('/api/settings')
+    if (!response.ok) return
+    const result = await response.json()
+    downloadPath.value = result.downloadDirectory || ''
+    transcriptPath.value = result.transcriptDirectory || ''
+    settingsReady = true
+    apiKeyConfigured.value = !!result.mimoApiKeyConfigured
+    apiKeyMask.value = result.mimoApiKeyMask || ''
+  } catch { /* settings appear when local service is available */ }
+}
+function markSettingsSaved() {
+  settingsSaved.value = true
+  clearTimeout(settingsSavedTimer)
+  settingsSavedTimer = setTimeout(() => { settingsSaved.value = false }, 1800)
+}
+
+function saveSettings(options = {}) {
+  const save = () => persistSettings(options)
+  const pending = settingsSaveQueue.then(save, save)
+  settingsSaveQueue = pending.catch(() => false)
+  return pending
+}
+
+async function persistSettings({ quiet = true } = {}) {
+  try {
+    const response = await fetch('/api/settings', {
       method: 'PUT', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ downloadDirectory: downloadPath.value }),
+      body: JSON.stringify({ downloadDirectory: downloadPath.value, transcriptDirectory: transcriptPath.value, apiKey: apiKey.value.trim() || undefined }),
     })
     const result = await response.json()
-    if (!response.ok) throw new Error(result.error?.message || '下载目录保存失败。')
+    if (!response.ok) throw new Error(result.error?.message || '设置保存失败。')
     downloadPath.value = result.downloadDirectory
-    savedDownloadPath.value = result.downloadDirectory
-    savedApiKey.value = apiKey.value
-    savedTranscriptPath.value = transcriptPath.value
-    notify('下载目录已保存到本机，后续任务将使用此位置')
-  } catch (error) { notify(error.message || '保存下载目录失败。') }
+    transcriptPath.value = result.transcriptDirectory
+    apiKey.value = ''
+    apiKeyConfigured.value = !!result.mimoApiKeyConfigured
+    apiKeyMask.value = result.mimoApiKeyMask || ''
+    markSettingsSaved()
+    if (!quiet) notify('设置已保存到本机')
+    return true
+  } catch (error) {
+    settingsSaved.value = false
+    notify(error.message || '保存设置失败。')
+    return false
+  }
 }
+
+function saveApiKeyOnBlur() {
+  if (!apiKey.value.trim()) return
+  setTimeout(() => {
+    if (!apiTesting.value && apiKey.value.trim()) void saveSettings({ quiet: true })
+  }, 0)
+}
+
+watch([downloadPath, transcriptPath], () => {
+  if (!settingsReady) return
+  settingsSaved.value = false
+  clearTimeout(settingsSaveTimer)
+  settingsSaveTimer = setTimeout(() => { void saveSettings({ quiet: true }) }, 500)
+})
 
 async function refreshLoginStatus() {
   loginLoading.value = true
@@ -493,11 +550,25 @@ async function logoutBilibili() {
   }
 }
 
-function testApi() {
-  if (!apiKey.value.trim()) { apiTested.value = false; notify('请先填写 MiMo API Key'); return }
+async function testApi() {
+  if (!apiKey.value.trim() && !apiKeyConfigured.value) { apiTested.value = false; notify('请先填写 MiMo API Key'); return }
+  const testingKey = apiKey.value.trim()
   apiTesting.value = true
   apiTested.value = false
-  setTimeout(() => { apiTesting.value = false; apiTested.value = true; notify('连接测试成功（演示）') }, 850)
+  try {
+    const response = await fetch('/api/settings/mimo/test', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ apiKey: testingKey }),
+    })
+    const result = await response.json()
+    if (!response.ok) throw new Error(result.error?.message || '连接测试失败，请检查设置。')
+    if (testingKey && !(await saveSettings({ quiet: true }))) throw new Error('连接成功，但 API Key 未能保存到本机。')
+    else await refreshSettings()
+    apiTested.value = true
+    notify('MiMo 连接成功，Key 已保存在本机')
+  } catch (error) {
+    notify(error.message || 'MiMo 连接失败，请稍后重试。')
+  } finally { apiTesting.value = false }
 }
 async function refreshLogPreview() {
   logLoading.value = true
@@ -577,8 +648,9 @@ async function openLogDirectory() {
   }
 }
 
-onMounted(() => { refreshBackendStatus(); refreshLoginStatus(); refreshTasks(); taskPollTimer = setInterval(refreshTasks, 1200) })
-onUnmounted(() => { clearInterval(taskPollTimer); clearInterval(qrPollTimer); clearTimeout(qrSuccessCloseTimer); clearTimeout(toastTimer) })
+watch(page, (value) => { if (value === 'transcripts') refreshTranscriptLibrary(); if (value === 'settings') refreshSettings() })
+onMounted(() => { refreshBackendStatus(); refreshLoginStatus(); refreshSettings(); refreshTasks(); taskPollTimer = setInterval(refreshTasks, 1200) })
+onUnmounted(() => { clearInterval(taskPollTimer); clearInterval(qrPollTimer); clearTimeout(qrSuccessCloseTimer); clearTimeout(toastTimer); clearTimeout(settingsSaveTimer); clearTimeout(settingsSavedTimer) })
 </script>
 
 <template>
@@ -662,7 +734,7 @@ onUnmounted(() => { clearInterval(taskPollTimer); clearInterval(qrPollTimer); cl
 
           <div v-else class="single-result panel">
             <div class="section-heading"><div><div class="eyebrow">解析结果</div><h2>单个视频</h2></div><span class="result-chip"><Check :size="14" />已识别</span></div>
-            <div class="single-video-card"><div class="single-cover thumb-art" :class="singleVideo.cover && !singleCoverFailed ? 'has-real-cover' : 'cover-unavailable'"><img v-if="singleVideo.cover && !singleCoverFailed" class="real-cover" :src="singleVideo.cover" alt="视频封面" @error="singleCoverFailed = true" /><span v-else class="cover-placeholder">封面暂不可用</span><span class="thumb-duration">{{ singleVideo.duration }}</span></div><div class="single-video-info"><span class="video-eyebrow"><Radio :size="13" />真实解析结果</span><h3>{{ singleVideo.title }}</h3><div class="single-meta"><span><UserRound :size="14" />{{ singleVideo.owner }}</span><span v-if="singleVideo.bvid">{{ singleVideo.bvid }}</span><span v-if="singleVideo.date">{{ singleVideo.date }}</span><span v-if="singleVideo.views !== null">{{ Number(singleVideo.views).toLocaleString('zh-CN') }} 播放</span></div><div class="single-divider"></div><div class="mode-label">选择处理方式</div><div class="mode-options"><button v-for="mode in modeOptions" :key="mode.id" class="mode-option" :class="{ active: batchAction === mode.id, disabled: mode.disabled }" :disabled="mode.disabled" :title="mode.disabled ? '文字稿功能将在后续版本接入' : ''" @click="batchAction = mode.id"><component :is="mode.icon" :size="17" /><span>{{ mode.label }}</span><span v-if="mode.disabled" class="mode-disabled-label">下一阶段</span><span v-else class="mode-radio"><i></i></span></button></div><button class="primary-button single-action" :disabled="batchAction === 'transcript'" @click="addSingleTask(batchAction)"><Plus :size="16" />创建任务</button></div></div>
+            <div class="single-video-card"><div class="single-cover thumb-art" :class="singleVideo.cover && !singleCoverFailed ? 'has-real-cover' : 'cover-unavailable'"><img v-if="singleVideo.cover && !singleCoverFailed" class="real-cover" :src="singleVideo.cover" alt="视频封面" @error="singleCoverFailed = true" /><span v-else class="cover-placeholder">封面暂不可用</span><span class="thumb-duration">{{ singleVideo.duration }}</span></div><div class="single-video-info"><span class="video-eyebrow"><Radio :size="13" />真实解析结果</span><h3>{{ singleVideo.title }}</h3><div class="single-meta"><span><UserRound :size="14" />{{ singleVideo.owner }}</span><span v-if="singleVideo.bvid">{{ singleVideo.bvid }}</span><span v-if="singleVideo.date">{{ singleVideo.date }}</span><span v-if="singleVideo.views !== null">{{ Number(singleVideo.views).toLocaleString('zh-CN') }} 播放</span></div><div class="single-divider"></div><div class="mode-label">选择处理方式</div><div class="mode-options"><button v-for="mode in modeOptions" :key="mode.id" class="mode-option" :class="{ active: batchAction === mode.id, disabled: mode.disabled }" :disabled="mode.disabled" :title="mode.disabled ? '文字稿功能将在后续版本接入' : ''" @click="batchAction = mode.id"><component :is="mode.icon" :size="17" /><span>{{ mode.label }}</span><span v-if="mode.disabled" class="mode-disabled-label">下一阶段</span><span v-else class="mode-radio"><i></i></span></button></div><button class="primary-button single-action" @click="addSingleTask(batchAction)"><Plus :size="16" />创建任务</button></div></div>
           </div>
         </section>
 
@@ -671,12 +743,12 @@ onUnmounted(() => { clearInterval(taskPollTimer); clearInterval(qrPollTimer); cl
           <div class="task-section panel">
             <div class="task-toolbar"><div class="filter-tabs"><button :class="{ active: taskTab === 'active' }" @click="taskTab = 'active'">正在处理<span v-if="activeTasks.length">{{ activeTasks.length }}</span></button><button :class="{ active: taskTab === 'history' }" @click="taskTab = 'history'">已完成<span v-if="historyTasks.length">{{ historyTasks.length }}</span></button></div></div>
             <div v-if="taskTab === 'active'" class="download-list">
-              <div v-if="runningTask" class="download-row running-row"><div class="task-type-icon" :class="runningTask.mode"><component :is="taskIcon[runningTask.mode]" :size="19" /></div><div class="download-task-main"><div class="download-task-title"><strong>{{ runningTask.title }}</strong><span class="download-mode">{{ taskNames[runningTask.mode] }}</span></div><div class="download-phase"><span class="task-status running">{{ runningTask.phase || '准备中' }}</span><span>{{ runningTask.owner }}</span></div><div class="download-progress-track" role="progressbar" aria-label="下载处理中"><span v-if="typeof runningTask.progress === 'number'" :style="{ width: `${runningTask.progress}%` }"></span><i v-else></i></div><span v-if="typeof runningTask.progress === 'number'" class="real-progress-label">{{ runningTask.progress }}%</span></div><button class="cancel-button" :disabled="runningTask.phase === '正在取消'" @click="requestCancelRunning(runningTask)"><X :size="14" />{{ runningTask.phase === '正在取消' ? '正在取消' : '取消' }}</button></div>
+              <div v-if="runningTask" class="download-row running-row"><div class="task-type-icon" :class="runningTask.mode"><component :is="taskIcon[runningTask.mode]" :size="19" /></div><div class="download-task-main"><div class="download-task-title"><strong>{{ runningTask.title }}</strong><span class="download-mode">{{ taskNames[runningTask.mode] }}</span></div><div class="download-phase"><span class="task-status running">{{ runningTask.phase || '准备中' }}</span><span v-if="runningTask.mode === 'transcript' && runningTask.transcriptProgress?.generatedCharacters">已生成 {{ runningTask.transcriptProgress.generatedCharacters }} 字</span><span v-else>{{ runningTask.owner }}</span></div><div class="download-progress-track" role="progressbar" aria-label="下载处理中"><span v-if="typeof runningTask.progress === 'number'" :style="{ width: `${runningTask.progress}%` }"></span><i v-else></i></div><span v-if="typeof runningTask.progress === 'number'" class="real-progress-label">{{ runningTask.progress }}%</span></div><button class="cancel-button" :disabled="runningTask.phase === '正在取消'" @click="requestCancelRunning(runningTask)"><X :size="14" />{{ runningTask.phase === '正在取消' ? '正在取消' : '取消' }}</button></div>
               <div v-for="(task, index) in waitingTasks" :key="task.id" class="download-row waiting-row"><div class="queue-index">{{ String(index + 1).padStart(2, '0') }}</div><div class="task-type-icon" :class="task.mode"><component :is="taskIcon[task.mode]" :size="18" /></div><div class="download-task-main"><div class="download-task-title"><strong>{{ task.title }}</strong><span class="download-mode">{{ taskNames[task.mode] }}</span></div><div class="download-phase"><span class="task-status waiting">等待中</span><span>{{ task.owner }}</span></div></div><button class="remove-button" @click="removeWaitingTask(task)"><Trash2 :size="14" />移除</button></div>
-              <div v-if="!activeTasks.length" class="empty-state task-empty"><div class="empty-state-icon"><ListChecks :size="19" /></div><strong>当前没有待处理任务</strong><span>新建下载任务后会在这里显示。</span></div>
+              <div v-if="!activeTasks.length" class="empty-state task-empty"><div class="empty-state-icon"><ListChecks :size="19" /></div><strong>当前没有待处理任务</strong><span>新建下载或转写任务后会在这里显示。</span></div>
             </div>
             <div v-else class="download-list history-download-list">
-              <div v-for="task in historyTasks" :key="task.id" class="download-row history-row"><div class="task-type-icon" :class="task.mode"><component :is="taskIcon[task.mode]" :size="18" /></div><div class="download-task-main"><div class="download-task-title"><strong>{{ task.title }}</strong><span class="download-mode">{{ taskNames[task.mode] }}</span><span class="task-status" :class="task.status">{{ task.status === 'completed' ? '已完成' : task.status === 'failed' ? '失败' : '已取消' }}</span></div><div v-if="task.status === 'completed'" class="history-task-meta"><span>{{ formatFileSize(task.fileSize) }}</span><i></i><span>{{ formatTaskDate(task.completedAt) }}</span></div><div v-else-if="task.status === 'failed'" class="history-task-error">{{ task.error || '下载失败，可重试。' }}</div><div v-else class="history-task-meta"><span>已取消</span><i></i><span>{{ formatTaskDate(task.completedAt) }}</span></div></div><button v-if="task.status === 'completed'" class="outline-button task-open-button" @click="openTaskLocation(task)"><FolderOpen :size="14" />打开位置</button><button v-if="task.status === 'failed'" class="retry-button" @click="retryTask(task)"><RefreshCw :size="14" />重试</button></div>
+              <div v-for="task in historyTasks" :key="task.id" class="download-row history-row"><div class="task-type-icon" :class="task.mode"><component :is="taskIcon[task.mode]" :size="18" /></div><div class="download-task-main"><div class="download-task-title"><strong>{{ task.title }}</strong><span class="download-mode">{{ taskNames[task.mode] }}</span><span class="task-status" :class="task.status">{{ task.status === 'completed' ? '已完成' : task.status === 'failed' ? '失败' : '已取消' }}</span></div><div v-if="task.status === 'completed'" class="history-task-meta"><span>{{ formatFileSize(task.fileSize) }}</span><i></i><span>{{ formatTaskDate(task.completedAt) }}</span></div><div v-else-if="task.status === 'failed'" class="history-task-error">{{ task.error || '下载失败，可重试。' }}</div><div v-else class="history-task-meta"><span>已取消</span><i></i><span>{{ formatTaskDate(task.completedAt) }}</span></div></div><button v-if="task.status === 'completed'" class="outline-button task-open-button" @click="openTaskLocation(task)"><FolderOpen :size="14" />打开位置</button><button v-if="task.status === 'failed' || (task.status === 'cancelled' && task.mode === 'transcript')" class="retry-button" @click="retryTask(task)"><RefreshCw :size="14" />{{ task.status === 'cancelled' ? '继续转写' : '重试' }}</button></div>
               <div v-if="!historyTasks.length" class="empty-state task-empty"><div class="empty-state-icon"><History :size="19" /></div><strong>暂无已完成的记录</strong><span>完成或失败的下载会保留在这里。</span></div>
             </div>
           </div>
@@ -684,17 +756,17 @@ onUnmounted(() => { clearInterval(taskPollTimer); clearInterval(qrPollTimer); cl
 
         <section v-else-if="page === 'transcripts'" class="page-content transcripts-page">
           <div class="page-heading"><div><div class="eyebrow">TRANSCRIPT LIBRARY</div><h1>文字稿</h1><p>查看、复制或导出已完成的文字稿。</p></div><div class="transcript-total"><BookOpenText :size="16" /><strong>{{ transcripts.length }}</strong> 篇文字稿</div></div>
-          <div v-if="transcripts.length" class="transcript-workspace panel"><aside class="transcript-sidebar"><div class="transcript-sidebar-head"><div><strong>全部文字稿</strong><span>{{ transcripts.length }} 篇</span></div><button class="icon-button" title="搜索文字稿"><Search :size="16" /></button></div><div class="transcript-search"><Search :size="15" /><input v-model="transcriptQuery" placeholder="搜索标题或 UP 主" /></div><div class="transcript-items"><button v-for="item in visibleTranscripts" :key="item.id" class="transcript-item" :class="{ active: activeTranscriptId === item.id }" @click="activeTranscriptId = item.id"><span class="transcript-item-icon"><FileText :size="16" /></span><span class="transcript-item-copy"><strong>{{ item.title }}</strong><small>{{ item.creator }} <i>·</i> {{ item.date }}</small></span><ChevronRight :size="15" class="transcript-item-arrow" /></button><div v-if="!visibleTranscripts.length" class="empty-state transcript-no-results"><div class="empty-state-icon"><Search :size="15" /></div><strong>没有找到匹配的文字稿</strong><span>试试其他标题或 UP 主名称。</span></div></div><div class="transcript-sidebar-foot"><span class="storage-icon"><HardDriveDownload :size="15" /></span><span>文字稿保存位置</span><button @click="page = 'settings'">查看设置<ChevronRight :size="13" /></button></div></aside>
-            <article class="transcript-reader"><div class="reader-top"><div class="reader-breadcrumb"><FileText :size="15" /><span>文字稿</span><ChevronRight :size="13" /><strong>{{ activeTranscript.title }}</strong></div><div class="reader-actions"><button class="outline-button" @click="copyTranscript"><Copy :size="15" />复制全文</button><button class="primary-button export-button" @click="exportTranscript"><Download :size="15" />导出 TXT</button></div></div><div class="reader-document"><div class="document-type"><span>课程转写</span><span class="document-dot"></span><span>完整文字稿</span></div><h2>{{ activeTranscript.title }}</h2><div class="document-meta"><span><UserRound :size="14" />{{ activeTranscript.creator }}</span><span><CalendarIcon />{{ activeTranscript.date }}</span><span><Clock3 :size="14" />{{ activeTranscript.duration }}</span></div><div class="document-rule"></div><div class="transcript-body"><p v-for="(paragraph, index) in activeTranscript.text.split('\n\n')" :key="index">{{ paragraph }}</p></div><div class="document-end"><span></span><small>正文结束</small><span></span></div></div><div class="reader-footer"><span><ShieldCheck :size="14" />保留讲师原话 · 未做总结和改写</span><span>共 {{ activeTranscript.text.length }} 字</span></div></article></div>
+          <div v-if="transcripts.length" class="transcript-workspace panel"><aside class="transcript-sidebar"><div class="transcript-sidebar-head"><div><strong>全部文字稿</strong><span>{{ transcripts.length }} 篇</span></div><button class="icon-button" title="搜索文字稿"><Search :size="16" /></button></div><div class="transcript-search"><Search :size="15" /><input v-model="transcriptQuery" placeholder="搜索标题或 UP 主" /></div><div class="transcript-items"><button v-for="item in visibleTranscripts" :key="item.id" class="transcript-item" :class="{ active: activeTranscriptId === item.id }" @click="activeTranscriptId = item.id"><span class="transcript-item-icon"><FileText :size="16" /></span><span class="transcript-item-copy"><strong>{{ item.title }}</strong><small>{{ item.creator }} <i>·</i> {{ formatTranscriptDate(item.completedAt) }}</small></span><ChevronRight :size="15" class="transcript-item-arrow" /></button><div v-if="!visibleTranscripts.length" class="empty-state transcript-no-results"><div class="empty-state-icon"><Search :size="15" /></div><strong>没有找到匹配的文字稿</strong><span>试试其他标题或 UP 主名称。</span></div></div><div class="transcript-sidebar-foot"><span class="storage-icon"><HardDriveDownload :size="15" /></span><span>文字稿保存位置</span><button @click="page = 'settings'">查看设置<ChevronRight :size="13" /></button></div></aside>
+            <article class="transcript-reader"><div class="reader-top"><div class="reader-breadcrumb"><FileText :size="15" /><span>文字稿</span><ChevronRight :size="13" /><strong>{{ activeTranscript.title }}</strong></div><div class="reader-actions"><button class="outline-button" @click="copyTranscript"><Copy :size="15" />复制全文</button><button class="outline-button" @click="openTaskLocation({ id: activeTranscript.id })"><FolderOpen :size="15" />打开位置</button><button class="primary-button export-button" @click="exportTranscript"><Download :size="15" />导出 TXT</button></div></div><div class="reader-document"><div class="document-type"><span>课程转写</span><span class="document-dot"></span><span>完整文字稿</span></div><h2>{{ activeTranscript.title }}</h2><div class="document-meta"><span><UserRound :size="14" />{{ activeTranscript.creator }}</span><span><CalendarIcon />{{ formatTranscriptDate(activeTranscript.completedAt) }}</span><span><Clock3 :size="14" />{{ activeTranscript.wordCount }} 字</span></div><div class="document-rule"></div><div class="transcript-body"><p v-for="(paragraph, index) in activeTranscript.text.split('\n\n')" :key="index">{{ paragraph }}</p></div><div class="document-end"><span></span><small>正文结束</small><span></span></div></div><div class="reader-footer"><span><ShieldCheck :size="14" />保留讲师原话 · 未做总结和改写</span><span>共 {{ activeTranscript.wordCount }} 字</span></div></article></div>
           <div v-else class="empty-state panel transcript-page-empty"><div class="empty-state-icon"><BookOpenText :size="19" /></div><strong>还没有文字稿</strong><span>完成一次转写后，文字稿会显示在这里。</span></div>
         </section>
 
         <section v-else class="page-content settings-page">
-          <div class="page-heading"><div><div class="eyebrow">PREFERENCES</div><h1>设置</h1><p>管理登录状态、转写服务和文件保存位置。</p></div><span v-if="settingsDirty" class="unsaved-pill">未保存</span><button class="primary-button save-settings" @click="saveSettings"><Check :size="16" />保存设置</button></div>
+          <div class="page-heading"><div><div class="eyebrow">PREFERENCES</div><h1>设置</h1><p>管理登录状态、转写服务和文件保存位置。</p></div><span v-if="settingsSaved" class="settings-saved"><Check :size="13" />已保存</span></div>
           <div class="settings-layout"><aside class="settings-nav panel"><span class="settings-nav-label">偏好设置</span><a class="settings-nav-item active"><UserRound :size="16" />账号与服务</a><a class="settings-nav-item"><FolderOpen :size="16" />文件与目录</a><a class="settings-nav-item"><SlidersIcon />任务处理</a><div class="settings-nav-divider"></div><div class="settings-nav-help"><CircleHelp :size="16" /><span>遇到问题？<small>查看使用说明</small></span><ExternalLink :size="13" /></div></aside><div class="settings-content">
             <section class="settings-card panel"><div class="settings-card-heading"><div class="settings-heading-icon bilibili-icon">哔</div><div><h2>B 站账号</h2><p>登录后可访问需要登录的视频内容</p></div><span class="settings-status" :class="loginState ? 'ok' : 'off'"><i></i>{{ loginLoading ? '检查中' : loginState ? '已登录' : '未登录' }}</span></div><div class="setting-divider"></div><div class="account-row"><div class="account-avatar"><img v-if="loginAccount?.avatar" :src="loginAccount.avatar" alt="" @error="hideLoginAvatar" />{{ !loginAccount?.avatar ? (loginState ? (loginAccount?.name?.slice(0, 1) || 'B') : 'B') : '' }}<span :class="{ online: loginState }"></span></div><div class="account-info"><strong>{{ loginAccount?.name || (loginState ? 'B 站账号' : '尚未登录 B 站') }}</strong><span>{{ loginAccount?.uid ? `UID：${loginAccount.uid}` : loginState ? '已使用本机保存的登录状态' : '扫码登录以使用完整解析能力' }}</span></div><button class="outline-button account-button" @click="openQrDialog"><ScanLine :size="15" />{{ loginState ? '重新登录' : '扫码登录' }}</button><button v-if="loginState" class="outline-button account-button logout-account-button" @click="logoutConfirm = true"><LogOut :size="15" />退出登录</button></div><div class="settings-tip"><ShieldCheck :size="15" /><span>登录凭据仅保存在本机，并由 BBDownNext 管理；公开视频仍可在未登录时解析。</span></div></section>
-            <section class="settings-card panel"><div class="settings-card-heading"><div class="settings-heading-icon model-icon"><Sparkles :size="18" /></div><div><h2>文字稿模型</h2><p>用于将视频音频转换为课程文字稿</p></div><span class="fixed-tag"><LockKeyhole :size="12" />固定模型</span></div><div class="model-field"><label>模型</label><div class="model-select"><span class="model-dot"></span><strong>MiMo V2.6 Flash</strong><span class="model-subtle">快速 · 低成本</span><ChevronDown :size="16" /></div><small>转写结果忠实保留原话，不总结、不重写。</small></div><div class="api-key-field"><div class="api-label"><label for="api-key">MiMo API Key</label><a href="#" @click.prevent="notify('API Key 申请链接为演示内容')">如何获取？<ExternalLink :size="12" /></a></div><div class="api-input-row"><div class="key-input"><KeyRound :size="16" /><input id="api-key" v-model="apiKey" :type="showApiKey ? 'text' : 'password'" autocomplete="off" placeholder="输入你的 API Key" @input="apiTested = false" /><button type="button" class="key-visibility" :aria-label="showApiKey ? '隐藏 API Key' : '显示 API Key'" @click="showApiKey = !showApiKey"><component :is="showApiKey ? EyeOff : Eye" :size="15" /></button></div><button class="outline-button test-api-button" :disabled="apiTesting" @click="testApi"><LoaderCircle v-if="apiTesting" class="spin" :size="15" /><Activity v-else :size="15" />{{ apiTesting ? '测试中' : '测试连接' }}</button></div><div class="api-feedback"><span v-if="apiTested" class="success-text"><Check :size="13" />连接成功（演示）</span><span v-else-if="!apiKey.trim()"><LockKeyhole :size="12" />尚未配置 API Key</span><span v-else-if="settingsDirty"><CircleHelp :size="13" />有未保存的更改</span><span v-else><Check :size="13" />已保存到当前演示会话</span></div><div v-if="!apiKey.trim()" class="empty-state api-empty-state"><div class="empty-state-icon"><KeyRound :size="16" /></div><strong>API 尚未配置</strong><span>填写并保存 API Key 后，才可测试连接。</span></div></div></section>
-            <section class="settings-card panel"><div class="settings-card-heading"><div class="settings-heading-icon folder-icon"><FolderOpen :size="18" /></div><div><h2>文件与目录</h2><p>设置下载文件和文字稿的保存位置</p></div></div><div class="setting-divider"></div><div class="path-setting"><div><label>视频与音频目录</label><span>下载完成的媒体文件保存位置</span></div><div class="path-control"><input v-model="downloadPath" aria-label="视频与音频目录" /></div></div><div class="path-setting"><div><label>文字稿目录</label><span>转写完成后导出的 TXT 文件位置</span></div><div class="path-control"><input v-model="transcriptPath" aria-label="文字稿目录" /></div></div><div class="settings-tip folder-tip"><HardDriveDownload :size="15" /><span>保存后立即用于新下载任务；目录不存在时会自动创建。文字稿目录暂未接入。</span></div></section>
+            <section class="settings-card panel"><div class="settings-card-heading"><div class="settings-heading-icon model-icon"><Sparkles :size="18" /></div><div><h2>文字稿模型</h2><p>用于将视频音频转换为课程文字稿</p></div><span class="fixed-tag"><LockKeyhole :size="12" />固定模型</span></div><div class="model-field"><label>模型</label><div class="model-select"><span class="model-dot"></span><strong>MiMo V2.6 Flash</strong><span class="model-subtle">快速 · 低成本</span><ChevronDown :size="16" /></div><small>转写结果忠实保留原话，不总结、不重写。</small></div><div class="api-key-field"><div class="api-label"><label for="api-key">MiMo API Key</label><a href="https://platform.xiaomimimo.com/console" target="_blank" rel="noreferrer">如何获取？<ExternalLink :size="12" /></a></div><div class="api-input-row"><div class="key-input"><KeyRound :size="16" /><input id="api-key" v-model="apiKey" :type="showApiKey ? 'text' : 'password'" autocomplete="off" :placeholder="apiKeyConfigured ? `已保存 ${apiKeyMask}，输入新 Key 可替换` : '输入你的 API Key'" @input="apiTested = false" @blur="saveApiKeyOnBlur" /><button type="button" class="key-visibility" :aria-label="showApiKey ? '隐藏 API Key' : '显示 API Key'" @click="showApiKey = !showApiKey"><component :is="showApiKey ? EyeOff : Eye" :size="15" /></button></div><button class="outline-button test-api-button" :disabled="apiTesting || (!apiKey.trim() && !apiKeyConfigured)" @click="testApi"><LoaderCircle v-if="apiTesting" class="spin" :size="15" /><Activity v-else :size="15" />{{ apiTesting ? '测试中' : '测试连接' }}</button></div><div class="api-feedback"><span v-if="apiTested" class="success-text"><Check :size="13" />连接成功</span><span v-else-if="apiKey.trim()"><CircleHelp :size="13" />Key 尚未验证</span><span v-else-if="apiKeyConfigured"><Check :size="13" />本机已保存 {{ apiKeyMask }}</span><span v-else><LockKeyhole :size="12" />尚未配置 API Key</span></div><div v-if="!apiKey.trim() && !apiKeyConfigured" class="empty-state api-empty-state"><div class="empty-state-icon"><KeyRound :size="16" /></div><strong>API 尚未配置</strong><span>填写 API Key 并测试连接后，会安全保存在本机。</span></div></div></section>
+            <section class="settings-card panel"><div class="settings-card-heading"><div class="settings-heading-icon folder-icon"><FolderOpen :size="18" /></div><div><h2>文件与目录</h2><p>设置下载文件和文字稿的保存位置</p></div></div><div class="setting-divider"></div><div class="path-setting"><div><label>视频与音频目录</label><span>下载完成的媒体文件保存位置</span></div><div class="path-control"><input v-model="downloadPath" aria-label="视频与音频目录" /></div></div><div class="path-setting"><div><label>文字稿目录</label><span>转写完成后导出的 TXT 文件位置</span></div><div class="path-control"><input v-model="transcriptPath" aria-label="文字稿目录" /></div></div><div class="settings-tip folder-tip"><HardDriveDownload :size="15" /><span>保存后立即用于新下载任务；目录不存在时会自动创建；文字稿按 UP 主/合集或视频标题分类保存。</span></div></section>
             <section class="settings-card compact-settings panel"><div class="settings-card-heading"><div class="settings-heading-icon queue-icon"><ListChecks :size="18" /></div><div><h2>任务队列</h2><p>下载与转写任务使用同一个串行队列</p></div></div><div class="queue-setting-line"><span>同时执行的任务</span><span class="serial-value"><span class="live-dot"></span>1 个任务 <span class="locked-mini"><LockKeyhole :size="11" />第一版固定</span></span></div></section>
           <section class="settings-card debug-logs-card panel"><div class="settings-card-heading"><div class="settings-heading-icon logs-icon"><History :size="18" /></div><div><h2>调试与日志</h2><p>排查问题时可复制近期记录，或导出完整日志</p></div><span class="settings-status" :class="backendStatus === 'online' ? 'ok' : 'off'"><i></i>{{ backendStatus === 'online' ? '后台已连接' : '后台未运行' }}</span></div><div class="setting-divider"></div><div class="logs-location"><span>日志路径</span><code>{{ logPath }}</code></div><div class="logs-state"><span class="logs-state-dot" :class="backendStatus === 'online' && logAvailable ? 'ready' : ''"></span><span>{{ backendStatus !== 'online' ? '打开 BiliScribe 后即可查看日志。' : !logAvailable ? '日志文件目前为空，产生记录后即可使用日志工具。' : `日志已就绪 · 当前文件 ${logLineCount} 行` }}</span><small v-if="backendStatus === 'online'">{{ bbdownAvailable ? `BBDownNext v${bbdownVersion || '版本未知'} 已就绪` : '未找到 BBDownNext 可执行文件' }}</small></div><div class="logs-actions"><button class="outline-button" :disabled="backendStatus !== 'online' || !logAvailable || logLoading" @click="copyRecentLogs"><Copy :size="15" />复制最新日志</button><button class="outline-button" :disabled="backendStatus !== 'online' || !logAvailable" @click="exportLogs"><Download :size="15" />导出日志</button><button class="outline-button" :disabled="backendStatus !== 'online'" @click="openLogDirectory"><FolderOpen :size="15" />打开日志目录</button></div><p class="logs-note">日志保留最近约 300 行供复制；完整日志会自动轮换。日志中不会写入 API Key、B 站 Cookie 或访问令牌。</p></section>
           </div></div>
@@ -702,7 +774,7 @@ onUnmounted(() => { clearInterval(taskPollTimer); clearInterval(qrPollTimer); cl
       </div>
     </main>
 
-    <div v-if="page === 'new' && parseState === 'success' && resultType === 'creator' && selectedCount" class="batch-bar"><div class="batch-selection"><div class="batch-selected-icon"><Check :size="16" /></div><div><strong>已选择 {{ selectedCount }} 个视频</strong><small v-if="creatorSearch.trim()">包含当前筛选外的选择</small><button @click="clearAll">清空选择</button></div></div><span class="batch-divider"></span><div class="batch-action-select"><span>添加为</span><button v-for="mode in modeOptions" :key="mode.id" :class="{ active: batchAction === mode.id, disabled: mode.disabled }" :disabled="mode.disabled" @click="batchAction = mode.id"><component :is="mode.icon" :size="15" />{{ mode.label }}<span v-if="mode.disabled" class="mode-disabled-label">下一阶段</span><span v-else class="radio-dot"><i></i></span></button></div><button class="primary-button batch-create" :disabled="batchAction === 'transcript'" @click="createBatchTasks"><Plus :size="16" />创建 {{ selectedCount }} 个任务</button></div>
+    <div v-if="page === 'new' && parseState === 'success' && resultType === 'creator' && selectedCount" class="batch-bar"><div class="batch-selection"><div class="batch-selected-icon"><Check :size="16" /></div><div><strong>已选择 {{ selectedCount }} 个视频</strong><small v-if="creatorSearch.trim()">包含当前筛选外的选择</small><button @click="clearAll">清空选择</button></div></div><span class="batch-divider"></span><div class="batch-action-select"><span>添加为</span><button v-for="mode in modeOptions" :key="mode.id" :class="{ active: batchAction === mode.id, disabled: mode.disabled }" :disabled="mode.disabled" @click="batchAction = mode.id"><component :is="mode.icon" :size="15" />{{ mode.label }}<span v-if="mode.disabled" class="mode-disabled-label">下一阶段</span><span v-else class="radio-dot"><i></i></span></button></div><button class="primary-button batch-create" @click="createBatchTasks"><Plus :size="16" />创建 {{ selectedCount }} 个任务</button></div>
 
     <div v-if="confirmationDialog" class="modal-backdrop" @click.self="confirmation = null"><div class="confirm-modal panel" role="dialog" aria-modal="true" :aria-label="confirmationTitle"><button class="icon-button modal-close" aria-label="关闭" @click="confirmation = null"><X :size="18" /></button><div class="confirm-modal-icon"><CircleHelp :size="20" /></div><h2>{{ confirmationTitle }}</h2><p>{{ confirmationMessage }}</p><div class="confirm-actions"><button class="outline-button" @click="confirmation = null">返回</button><button class="primary-button confirm-danger" @click="confirmAction">{{ confirmation?.type === 'clear-history' ? '清除历史' : '确认取消' }}</button></div></div></div>
     <div v-if="qrDialog" class="modal-backdrop" @click.self="closeQrDialog"><div class="login-modal panel" role="dialog" aria-modal="true" aria-label="扫码登录 B 站"><button class="icon-button modal-close" aria-label="关闭" @click="closeQrDialog"><X :size="18" /></button><div class="login-modal-icon"><ScanLine :size="22" /></div><h2>扫码登录 B 站</h2><p>打开哔哩哔哩 App，扫描二维码完成登录</p><div class="real-qr" :class="{ 'qr-is-loading': qrStarting }"><img v-if="qrImage" :src="qrImage" alt="B 站登录二维码" /><div v-else class="qr-placeholder"><LoaderCircle v-if="qrStarting" class="spin" :size="24" /><ScanLine v-else :size="24" /></div></div><div class="qr-note" :class="`qr-${qrStatus}`"><span class="live-dot"></span>{{ qrStatusLabel }}</div><p v-if="qrMessage" class="qr-error-message">{{ qrMessage }}</p><button v-if="['expired', 'failed'].includes(qrStatus)" class="primary-button simulate-login" :disabled="qrStarting" @click="startQrLogin"><RefreshCw :size="16" />刷新二维码</button><small class="modal-disclaimer">登录信息仅保存在本机，不会发送给 BiliScribe 服务之外的站点。</small></div></div>

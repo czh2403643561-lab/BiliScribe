@@ -24,21 +24,64 @@ const productionMode = process.argv.includes('--production')
 const distDirectory = path.join(projectRoot, 'dist')
 const stateDirectory = path.join(projectRoot, '.biliscribe')
 const stateFile = path.join(stateDirectory, 'state.json')
+const secretsFile = path.join(stateDirectory, 'secrets.json')
+const transcriptsFile = path.join(stateDirectory, 'transcripts.json')
+const transcriptWorkDirectory = path.join(stateDirectory, 'transcript-work')
+const transcriptPromptFile = path.join(projectRoot, 'prompts', 'bazi-transcript.md')
+const transcriptMaxBase64Bytes = 40_000_000
+const transcriptSegmentSafetyBase64Bytes = 38_000_000
+const transcriptBitrate = '32k'
+const transcriptMaxSplitDepth = 2
+const transcriptProcessingVersion = 2
+const transcriptConnectTimeoutMs = 30_000
+const transcriptStreamIdleTimeoutMs = 120_000
 const defaultDownloadDirectory = path.join(os.homedir(), 'Videos', 'BiliScribe')
 const mediaExtensions = new Set(['.mp4', '.mkv', '.flv', '.m4a', '.mka', '.mp3', '.aac', '.wav', '.flac', '.m4s'])
 const bilibiliImageHosts = ['hdslb.com', 'bilivideo.com']
 const wbiMixinIndices = [46, 47, 18, 2, 53, 8, 23, 32, 15, 50, 10, 31, 58, 3, 45, 35, 27, 43, 5, 49, 33, 9, 42, 19, 29, 28, 14, 39, 12, 38, 41, 13, 37, 48, 7, 16, 24, 55, 40, 61, 26, 17, 0, 1, 60, 51, 30, 4, 22, 25, 54, 21, 56, 59, 6, 63, 57, 62, 11, 36, 20, 34, 44, 52]
 
 let downloadDirectory = defaultDownloadDirectory
+let transcriptDirectory = defaultDownloadDirectory
+let mimoApiKey = ''
 const downloadTasks = new Map()
 let queuePumpActive = false
 let activeDownloadChild = null
 let activeDownloadTaskId = null
+let activeTaskAbortController = null
+let transcriptWakeLockChild = null
+let mimoRequestTail = Promise.resolve()
+
+async function withMiMoRequestLock(callback) {
+  const previous = mimoRequestTail
+  let release
+  mimoRequestTail = new Promise((resolve) => { release = resolve })
+  await previous
+  try { return await callback() } finally { release() }
+}
+
+try {
+  const secrets = JSON.parse(fs.readFileSync(secretsFile, 'utf8'))
+  if (typeof secrets.mimoApiKey === 'string') mimoApiKey = secrets.mimoApiKey
+} catch (error) {
+  if (error.code !== 'ENOENT') log('warn', 'Local service credentials could not be loaded', { code: error.code || 'credentials_load_failed' })
+}
+
+function maskMimoApiKey(key = mimoApiKey) {
+  return key ? `••••••••${key.slice(-4)}` : ''
+}
+
+function saveMimoApiKey(key) {
+  fs.mkdirSync(stateDirectory, { recursive: true })
+  const temporary = `${secretsFile}.${process.pid}.tmp`
+  fs.writeFileSync(temporary, `${JSON.stringify({ mimoApiKey: key }, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 })
+  fs.renameSync(temporary, secretsFile)
+  mimoApiKey = key
+}
 
 function saveLocalState() {
   try {
     fs.mkdirSync(stateDirectory, { recursive: true })
-    const payload = JSON.stringify({ downloadDirectory, tasks: [...downloadTasks.values()] }, null, 2)
+    const payload = JSON.stringify({ downloadDirectory, transcriptDirectory, tasks: [...downloadTasks.values()] }, null, 2)
     const temporary = `${stateFile}.${process.pid}.tmp`
     fs.writeFileSync(temporary, `${payload}\n`, 'utf8')
     fs.renameSync(temporary, stateFile)
@@ -50,6 +93,8 @@ function saveLocalState() {
 try {
   const saved = JSON.parse(fs.readFileSync(stateFile, 'utf8'))
   if (typeof saved.downloadDirectory === 'string' && saved.downloadDirectory.trim()) downloadDirectory = path.resolve(saved.downloadDirectory)
+  if (typeof saved.transcriptDirectory === 'string' && saved.transcriptDirectory.trim()) transcriptDirectory = path.resolve(saved.transcriptDirectory)
+  else transcriptDirectory = downloadDirectory
   for (const task of Array.isArray(saved.tasks) ? saved.tasks : []) {
     if (!task?.id || !['waiting', 'running', 'completed', 'failed', 'cancelled'].includes(task.status)) continue
     if (task.status === 'running') {
@@ -86,12 +131,14 @@ function readBBDownVersion() {
 const bbdownVersion = readBBDownVersion()
 
 function sendJson(response, statusCode, data) {
+  if (response.headersSent || response.writableEnded) return false
   response.writeHead(statusCode, {
     'Content-Type': 'application/json; charset=utf-8',
     'Cache-Control': 'no-store',
     'X-Content-Type-Options': 'nosniff',
   })
   response.end(JSON.stringify(data))
+  return true
 }
 
 function sendError(response, statusCode, code, message) {
@@ -1070,6 +1117,715 @@ async function runDownloadTask(task) {
   }
 }
 
+function transcriptFailure(code, message) {
+  return Object.assign(new Error(message), { code })
+}
+
+function setTranscriptPhase(task, phase) {
+  if (task.phase === phase) return
+  task.phase = phase
+  saveLocalState()
+  log('info', 'Transcript task phase changed', { taskId: task.id, bvid: task.bvid, phase })
+}
+
+async function runTranscriptProcess(task, command, args, phase) {
+  if (task.cancelRequested) throw transcriptFailure('transcript_cancelled', '任务已取消。')
+  setTranscriptPhase(task, phase)
+  let child
+  try {
+    child = spawn(command, args, { cwd: projectRoot, windowsHide: true, stdio: 'ignore' })
+  } catch (error) {
+    throw transcriptFailure(error.code || 'transcript_process_start_failed', '音频处理程序无法启动。')
+  }
+  activeDownloadChild = child
+  childProcesses.add(child)
+  const result = await new Promise((resolve, reject) => {
+    let settled = false
+    child.once('error', (error) => {
+      if (settled) return
+      settled = true
+      reject(transcriptFailure(error.code || 'transcript_process_failed', '音频处理程序运行失败。'))
+    })
+    child.once('close', (exitCode, signal) => {
+      if (settled) return
+      settled = true
+      resolve({ exitCode, signal })
+    })
+  }).finally(() => {
+    childProcesses.delete(child)
+    if (activeDownloadChild === child) activeDownloadChild = null
+  })
+  if (task.cancelRequested) throw transcriptFailure('transcript_cancelled', '任务已取消。')
+  if (result.exitCode !== 0) throw transcriptFailure('transcript_process_failed', '音频处理失败，请检查 FFmpeg 或 B 站网络后重试。')
+  return result
+}
+
+function startTranscriptWakeLock(task) {
+  if (process.platform !== 'win32' || transcriptWakeLockChild) return
+  const script = "Add-Type -Namespace BiliScribe -Name Power -MemberDefinition '[System.Runtime.InteropServices.DllImport(\"kernel32.dll\")] public static extern uint SetThreadExecutionState(uint esFlags);'; $r = [BiliScribe.Power]::SetThreadExecutionState([uint32]2147483649); if ($r -eq 0) { exit 2 }; [Console]::Out.WriteLine('enabled'); while ($true) { Start-Sleep -Seconds 30 }"
+  try {
+    const child = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], { windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'] })
+    transcriptWakeLockChild = child
+    childProcesses.add(child)
+    child.stdout?.on('data', (chunk) => {
+      if (String(chunk).includes('enabled')) log('info', 'Transcript sleep prevention enabled', { taskId: task.id })
+    })
+    child.once('error', (error) => {
+      if (transcriptWakeLockChild === child) transcriptWakeLockChild = null
+      childProcesses.delete(child)
+      log('warn', 'Transcript sleep prevention unavailable', { taskId: task.id, code: error.code || 'power_request_failed' })
+    })
+    child.once('close', (code) => {
+      childProcesses.delete(child)
+      if (transcriptWakeLockChild === child) transcriptWakeLockChild = null
+      if (code !== 0 && !child.stopRequested && !shuttingDown) log('warn', 'Transcript sleep prevention ended', { taskId: task.id, code: code ?? 'unknown' })
+    })
+  } catch (error) {
+    log('warn', 'Transcript sleep prevention unavailable', { taskId: task.id, code: error.code || 'power_request_failed' })
+  }
+}
+
+function stopTranscriptWakeLock() {
+  const child = transcriptWakeLockChild
+  transcriptWakeLockChild = null
+  if (child) { child.stopRequested = true; child.kill() }
+}
+
+function transcriptOutputDirectory(task) {
+  if (task.creatorName && task.groupName) {
+    return path.join(transcriptDirectory, safeDirectoryName(task.creatorName), safeDirectoryName(task.groupName), '文字稿')
+  }
+  return path.join(transcriptDirectory, safeDirectoryName(task.title), '文字稿')
+}
+
+function matchingCompletedAudio(task) {
+  const candidates = getDownloadTasks()
+    .filter((item) => item.bvid === task.bvid && item.mode === 'audio' && item.status === 'completed')
+    .flatMap((item) => item.outputFiles?.length ? item.outputFiles : item.outputPath ? [item.outputPath] : [])
+    .filter((file) => fs.existsSync(file) && fs.statSync(file).isFile())
+  return candidates.find((file) => path.extname(file).toLowerCase() === '.m4a')
+    || candidates.find((file) => ['.mp3', '.mka', '.aac'].includes(path.extname(file).toLowerCase()))
+    || null
+}
+
+function readTranscriptLibrary() {
+  try {
+    const saved = JSON.parse(fs.readFileSync(transcriptsFile, 'utf8'))
+    return Array.isArray(saved) ? saved.filter((item) => item && typeof item.id === 'string') : []
+  } catch (error) {
+    if (error.code !== 'ENOENT') log('warn', 'Transcript library could not be loaded', { code: error.code || 'transcript_library_load_failed' })
+    return []
+  }
+}
+
+function writeTranscriptLibrary(entries) {
+  fs.mkdirSync(stateDirectory, { recursive: true })
+  const temporary = `${transcriptsFile}.${process.pid}.tmp`
+  fs.writeFileSync(temporary, `${JSON.stringify(entries, null, 2)}\n`, 'utf8')
+  fs.renameSync(temporary, transcriptsFile)
+}
+
+async function hashFile(filePath) {
+  const hash = createHash('sha256')
+  for await (const chunk of fs.createReadStream(filePath)) hash.update(chunk)
+  return hash.digest('hex')
+}
+
+function saveTranscriptCheckpoint(directory, checkpoint) {
+  checkpoint.updatedAt = new Date().toISOString()
+  const statePath = path.join(directory, 'state.json')
+  const temporary = `${statePath}.${process.pid}.tmp`
+  fs.writeFileSync(temporary, `${JSON.stringify(checkpoint, null, 2)}\n`, 'utf8')
+  fs.renameSync(temporary, statePath)
+}
+
+function writeTranscriptSegmentText(directory, segmentId, text) {
+  const outputPath = path.join(directory, `segment-${segmentId}.txt`)
+  const temporary = `${outputPath}.${process.pid}.tmp`
+  fs.writeFileSync(temporary, `${cleanTranscriptText(text)}\n`, 'utf8')
+  fs.renameSync(temporary, outputPath)
+}
+
+function readTranscriptCheckpoint(directory, taskId) {
+  try {
+    const saved = JSON.parse(fs.readFileSync(path.join(directory, 'state.json'), 'utf8'))
+    if (saved.taskId !== taskId || !Array.isArray(saved.segments) || !Array.isArray(saved.completedSegments)) return null
+    if (saved.segments.some((item) => !item || !/^\d{3}[ab]{0,2}$/.test(item.id || ''))) return null
+    return saved
+  } catch (error) {
+    if (error.code !== 'ENOENT') log('warn', 'Transcript checkpoint could not be loaded', { code: error.code || 'checkpoint_read_failed' })
+    return null
+  }
+}
+
+async function clearTranscriptCheckpoint(directory) {
+  const resolvedRoot = path.resolve(transcriptWorkDirectory)
+  const resolvedDirectory = path.resolve(directory)
+  if (!resolvedDirectory.startsWith(`${resolvedRoot}${path.sep}`)) throw transcriptFailure('unsafe_checkpoint_path', '转写临时目录路径无效。')
+  const names = await fs.promises.readdir(directory).catch(() => [])
+  for (const name of names) {
+    if (/^segment-\d{3}[ab]{0,2}(?:\.partial)?\.(?:m4a|mp3|txt)(?:\.\d+\.tmp)?$/i.test(name) || name === 'state.json') {
+      await fs.promises.rm(path.join(directory, name), { force: true })
+    }
+  }
+  const audioSegmentsDirectory = path.join(directory, 'audio-segments')
+  const resolvedSegmentsDirectory = path.resolve(audioSegmentsDirectory)
+  if (resolvedSegmentsDirectory.startsWith(`${resolvedDirectory}${path.sep}`)) {
+    await fs.promises.rm(audioSegmentsDirectory, { recursive: true, force: true })
+  }
+}
+
+function cleanTranscriptText(value) {
+  return String(value || '').replace(/\r\n?/g, '\n').replace(/[\t\u00a0 ]+\n/g, '\n').trim()
+}
+
+function mergeTranscriptSegments(segments) {
+  let result = ''
+  for (const segment of segments) {
+    let next = cleanTranscriptText(segment)
+    if (result && next) {
+      const previousSentence = result.match(/[^。！？!?\n]{8,}[。！？!?]?\s*$/u)?.[0]?.trim() || ''
+      const nextSentence = next.match(/^[^。！？!?\n]{8,}[。！？!?]?/u)?.[0]?.trim() || ''
+      const normalize = (text) => text.replace(/[\s，。！？、；：,.!?;:「」『』“”"'（）()]/gu, '')
+      if (previousSentence && nextSentence && normalize(previousSentence) === normalize(nextSentence)) {
+        next = next.slice(next.indexOf(nextSentence) + nextSentence.length).trimStart()
+      }
+    }
+    if (next) result += `${result ? '\n\n' : ''}${next}`
+  }
+  return result.trim()
+}
+
+function transcriptErrorForStatus(status) {
+  if (status === 401 || status === 403) return transcriptFailure(`mimo_http_${status}`, 'MiMo API Key 无效或没有权限，请在设置中检查。')
+  if (status === 429) return transcriptFailure('mimo_rate_limited', 'MiMo 请求过于频繁，稍后可重试。')
+  if (status >= 500) return transcriptFailure(`mimo_http_${status}`, 'MiMo 服务暂时不可用，请稍后重试。')
+  return transcriptFailure(`mimo_http_${status}`, `MiMo 请求失败（HTTP ${status}）。`)
+}
+
+async function callMiMoForSegment(task, prompt, filePath, index, count) {
+  return withMiMoRequestLock(() => callMiMoForSegmentUnlocked(task, prompt, filePath, index, count))
+}
+
+async function callMiMoForSegmentUnlocked(task, prompt, filePath, index, count) {
+  if (!mimoApiKey) throw transcriptFailure('mimo_key_missing', '请先在设置中配置 MiMo API Key。')
+  const fileStats = await fs.promises.stat(filePath)
+  const base64Size = Math.ceil(fileStats.size / 3) * 4
+  if (base64Size > transcriptMaxBase64Bytes) throw transcriptFailure('audio_segment_too_large', '音频片段超过 MiMo Base64 安全大小。')
+  const bytes = await fs.promises.readFile(filePath)
+  const extension = path.extname(filePath).toLowerCase()
+  const mimeType = extension === '.m4a' ? 'audio/mp4' : 'audio/mpeg'
+  const format = extension === '.m4a' ? 'm4a' : 'mp3'
+  const body = {
+    model: 'mimo-v2.6-flash',
+    stream: true,
+    stream_options: { include_usage: true },
+    max_completion_tokens: 32000,
+    thinking: { type: 'disabled' },
+    messages: [
+      { role: 'system', content: `${prompt}\n\n本次任务补充要求：请修正所附音频中的本段课程内容。只输出本段修正后的完整正文，不输出字数统计、标题、摘要、说明或其他内容。` },
+      { role: 'user', content: [
+        { type: 'input_audio', input_audio: { data: `data:${mimeType};base64,${bytes.toString('base64')}`, format } },
+        { type: 'text', text: `这是第 ${index} 段，共 ${count} 段。请只返回本段修正后的完整正文，保持原话顺序，不要总结全文。` },
+      ] },
+    ],
+  }
+  let lastError
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    if (task.cancelRequested) throw transcriptFailure('transcript_cancelled', '任务已取消。')
+    const controller = new AbortController()
+    activeTaskAbortController = controller
+    let connectTimer
+    let idleTimer
+    let outputHandle
+    let streamReader
+    let outputPath
+    let characterCount = 0
+    let firstContentAt = null
+    const requestStartedAt = Date.now()
+    const expectedModel = 'mimo-v2.6-flash'
+    try {
+      const outputDirectory = path.join(transcriptWorkDirectory, task.id)
+      await fs.promises.mkdir(outputDirectory, { recursive: true })
+      outputPath = path.join(outputDirectory, `segment-${String(index).padStart(3, '0')}.partial.txt`)
+      await fs.promises.rm(outputPath, { force: true })
+      outputHandle = await fs.promises.open(outputPath, 'w')
+      task.transcriptProgress = { ...(task.transcriptProgress || {}), generatedCharacters: 0 }
+      connectTimer = setTimeout(() => controller.abort('connect_timeout'), transcriptConnectTimeoutMs)
+      const response = await fetch('https://api.xiaomimimo.com/v1/chat/completions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'api-key': mimoApiKey },
+        body: JSON.stringify(body),
+        signal: controller.signal,
+      })
+      clearTimeout(connectTimer)
+      log('info', 'MiMo transcript response received', { taskId: task.id, bvid: task.bvid, segment: index, status: response.status })
+      if (!response.ok) {
+        await response.body?.cancel().catch(() => {})
+        const error = transcriptErrorForStatus(response.status)
+        const retryable = response.status === 429 || response.status >= 500
+        if (retryable && attempt < 2) {
+          log('warn', 'MiMo transcript request retry', { taskId: task.id, segment: index, status: response.status, attempt: attempt + 1 })
+          await outputHandle.close()
+          outputHandle = null
+          await fs.promises.rm(outputPath, { force: true })
+          await new Promise((resolve) => setTimeout(resolve, 1000 * (2 ** attempt)))
+          continue
+        }
+        throw error
+      }
+      if (!response.body) throw transcriptFailure('mimo_invalid_response', 'MiMo 没有返回流式内容。')
+      log('info', 'MiMo transcript stream started', { taskId: task.id, bvid: task.bvid, segment: index, segmentCount: count })
+      const reader = response.body.getReader()
+      streamReader = reader
+      const decoder = new TextDecoder()
+      let buffer = ''
+      let finishReason = null
+      let responseModel = ''
+      let usage = null
+      let streamDone = false
+      while (!streamDone) {
+        if (task.cancelRequested) throw transcriptFailure('transcript_cancelled', '任务已取消。')
+        const readPromise = reader.read()
+        const next = await Promise.race([
+          readPromise,
+          new Promise((_, reject) => {
+            idleTimer = setTimeout(() => {
+              controller.abort('stream_idle_timeout')
+              reject(transcriptFailure('mimo_stream_idle_timeout', 'MiMo 流式输出长时间没有数据，请稍后重试。'))
+            }, transcriptStreamIdleTimeoutMs)
+          }),
+        ])
+        clearTimeout(idleTimer)
+        idleTimer = null
+        if (next.done) {
+          buffer += decoder.decode()
+          streamDone = true
+        } else buffer += decoder.decode(next.value, { stream: true })
+        const events = buffer.split(/\r?\n\r?\n/)
+        buffer = events.pop() || ''
+        for (const event of events) {
+          const data = event.split(/\r?\n/).filter((line) => line.startsWith('data:')).map((line) => line.slice(5).trimStart()).join('\n')
+          if (!data || data === '[DONE]') continue
+          let chunk
+          try { chunk = JSON.parse(data) } catch { throw transcriptFailure('mimo_invalid_stream_chunk', 'MiMo 流式数据格式异常。') }
+          if (chunk.model) responseModel = String(chunk.model)
+          if (chunk.usage) usage = chunk.usage
+          const choice = chunk.choices?.[0]
+          if (choice?.finish_reason) finishReason = String(choice.finish_reason)
+          const content = choice?.delta?.content
+          if (typeof content === 'string' && content) {
+            if (firstContentAt === null) {
+              firstContentAt = Date.now()
+              log('info', 'MiMo first transcript content received', {
+                taskId: task.id, bvid: task.bvid, segment: index, timeToFirstContentMs: firstContentAt - requestStartedAt,
+              })
+            }
+            await outputHandle.write(content)
+            characterCount += Array.from(content).length
+            task.transcriptProgress = { ...(task.transcriptProgress || {}), generatedCharacters: characterCount }
+            if (characterCount % 1000 < Array.from(content).length) saveLocalState()
+          }
+        }
+      }
+      if (buffer.trim()) {
+        const data = buffer.split(/\r?\n/).filter((line) => line.startsWith('data:')).map((line) => line.slice(5).trimStart()).join('\n')
+        if (data && data !== '[DONE]') {
+          try {
+            const chunk = JSON.parse(data)
+            if (chunk.model) responseModel = String(chunk.model)
+            if (chunk.usage) usage = chunk.usage
+            if (chunk.choices?.[0]?.finish_reason) finishReason = String(chunk.choices[0].finish_reason)
+            const content = chunk.choices?.[0]?.delta?.content
+            if (typeof content === 'string' && content) { await outputHandle.write(content); characterCount += Array.from(content).length }
+          } catch { throw transcriptFailure('mimo_invalid_stream_chunk', 'MiMo 流式数据格式异常。') }
+        }
+      }
+      if (responseModel.toLowerCase() !== expectedModel) throw transcriptFailure('mimo_unexpected_model', 'MiMo 返回了非预期模型，文字稿未保存。')
+      if (finishReason !== 'stop') {
+        log('warn', 'MiMo transcript segment was incomplete', {
+          taskId: task.id, bvid: task.bvid, segment: index, model: responseModel, finishReason: finishReason || 'missing',
+          completionTokens: Number.isFinite(usage?.completion_tokens) ? usage.completion_tokens : null,
+          reasoningCount: Number.isFinite(usage?.completion_tokens_details?.reasoning_tokens) ? usage.completion_tokens_details.reasoning_tokens : null,
+        })
+        if (finishReason === 'length') throw transcriptFailure('mimo_output_truncated', 'MiMo 输出长度不足，正在缩小此片段后重试。')
+        if (finishReason === 'content_filter') throw transcriptFailure('mimo_content_filtered', 'MiMo 安全过滤阻止了本段返回；不会自动重复请求，请检查音频后重试。')
+        throw transcriptFailure('mimo_incomplete_response', 'MiMo 未能完整返回本段文字稿，请重试。')
+      }
+      await outputHandle.close()
+      outputHandle = null
+      const text = cleanTranscriptText(await fs.promises.readFile(outputPath, 'utf8'))
+      if (!text) throw transcriptFailure('mimo_empty_response', 'MiMo 返回了空文字稿，请重试。')
+      log('info', 'MiMo transcript segment completed', {
+        taskId: task.id, bvid: task.bvid, segment: index, model: responseModel,
+        durationMs: Date.now() - requestStartedAt, timeToFirstContentMs: firstContentAt === null ? null : firstContentAt - requestStartedAt,
+        textLength: Array.from(text).length, finishReason,
+        completionTokens: Number.isFinite(usage?.completion_tokens) ? usage.completion_tokens : null,
+        reasoningCount: Number.isFinite(usage?.completion_tokens_details?.reasoning_tokens) ? usage.completion_tokens_details.reasoning_tokens : null,
+      })
+      await fs.promises.rm(outputPath, { force: true })
+      return text
+    } catch (error) {
+      await streamReader?.cancel().catch(() => {})
+      const cancelled = task.cancelRequested
+      if (cancelled) {
+        await outputHandle?.close().catch(() => {})
+        outputHandle = null
+        await fs.promises.rm(outputPath, { force: true })
+        throw transcriptFailure('transcript_cancelled', '任务已取消。')
+      }
+      const transient = error.name === 'TypeError' || error.name === 'TimeoutError' || error.code === 'ETIMEDOUT' || ['connect_timeout', 'stream_idle_timeout'].includes(controller.signal.reason)
+      if ((transient || error.code === 'mimo_invalid_response' || error.code === 'mimo_invalid_stream_chunk') && attempt < 2) {
+        log('warn', 'MiMo transcript request retry', { taskId: task.id, segment: index, code: error.code || controller.signal.reason || 'network_error', attempt: attempt + 1 })
+        lastError = error
+        await outputHandle?.close().catch(() => {})
+        outputHandle = null
+        await fs.promises.rm(outputPath, { force: true })
+        await new Promise((resolve) => setTimeout(resolve, 1000 * (2 ** attempt)))
+        continue
+      }
+      await outputHandle?.close().catch(() => {})
+      outputHandle = null
+      await fs.promises.rm(outputPath, { force: true })
+      if (transient) {
+        const code = controller.signal.reason === 'connect_timeout' ? 'mimo_connect_timeout' : error.code || 'mimo_stream_idle_timeout'
+        throw transcriptFailure(code, controller.signal.reason === 'connect_timeout' ? '连接 MiMo 超时，请检查网络后重试。' : 'MiMo 流式输出中断，请稍后重试。')
+      }
+      throw error
+    } finally {
+      clearTimeout(connectTimer)
+      clearTimeout(idleTimer)
+      await outputHandle?.close().catch(() => {})
+      if (activeTaskAbortController === controller) activeTaskAbortController = null
+    }
+  }
+  throw transcriptFailure('mimo_network_error', lastError?.code || 'MiMo 网络请求失败，请稍后重试。')
+}
+
+function findFFprobe(ffmpegPath) {
+  const sibling = path.join(path.dirname(ffmpegPath), process.platform === 'win32' ? 'ffprobe.exe' : 'ffprobe')
+  if (fs.existsSync(sibling)) return sibling
+  if (process.platform === 'win32') {
+    const result = spawnSync('where.exe', ['ffprobe.exe'], { encoding: 'utf8', timeout: 2500, windowsHide: true })
+    return (result.stdout || '').split(/\r?\n/).map((line) => line.trim()).find((line) => line && fs.existsSync(line)) || null
+  }
+  return null
+}
+
+function probeAudioDuration(ffmpegPath, filePath) {
+  const executable = findFFprobe(ffmpegPath)
+  if (!executable) return null
+  const result = spawnSync(executable, ['-v', 'error', '-show_entries', 'format=duration', '-of', 'default=noprint_wrappers=1:nokey=1', filePath], {
+    encoding: 'utf8', timeout: 15_000, windowsHide: true,
+  })
+  if (result.status !== 0) return null
+  const duration = Number.parseFloat((result.stdout || '').trim())
+  return Number.isFinite(duration) && duration > 0 ? duration : null
+}
+
+function transcriptSegmentFilename(segment) {
+  if (!/^\d{3}[ab]{0,2}$/.test(segment.id)) throw transcriptFailure('invalid_segment_id', '转写分段编号无效。')
+  return `segment-${segment.id}.m4a`
+}
+
+async function splitTranscriptSegment(task, ffmpegPath, workDirectory, segment) {
+  const segmentDirectory = path.join(workDirectory, 'audio-segments')
+  const inputPath = path.join(segmentDirectory, transcriptSegmentFilename(segment))
+  const nextDepth = (segment.splitDepth || 0) + 1
+  const midpointSeconds = Number(segment.durationSeconds) / 2
+  if (!Number.isFinite(midpointSeconds) || midpointSeconds < 30 || nextDepth > transcriptMaxSplitDepth) {
+    throw transcriptFailure('mimo_output_truncated_terminal', '该音频片段仍被 MiMo 截断，已达到安全细分上限。')
+  }
+  const splitPattern = path.join(segmentDirectory, `segment-${segment.id}-split-%01d.m4a`)
+  await runTranscriptProcess(task, ffmpegPath, [
+    '-hide_banner', '-loglevel', 'error', '-y', '-i', inputPath, '-map', '0:a:0', '-vn', '-ac', '1', '-ar', '16000', '-c:a', 'aac', '-b:a', transcriptBitrate,
+    '-f', 'segment', '-segment_format', 'mp4', '-segment_time', midpointSeconds.toFixed(3), '-segment_start_number', '1', '-reset_timestamps', '1', splitPattern,
+  ], '音频处理中')
+  const staged = (await fs.promises.readdir(segmentDirectory))
+    .filter((name) => name.startsWith(`segment-${segment.id}-split-`) && name.endsWith('.m4a'))
+    .sort((left, right) => left.localeCompare(right, 'en'))
+  if (staged.length !== 2) {
+    for (const name of staged) await fs.promises.rm(path.join(segmentDirectory, name), { force: true })
+    throw transcriptFailure('transcript_segment_split_failed', '无法将被截断的音频片段安全拆分。')
+  }
+  const children = []
+  for (let index = 0; index < staged.length; index += 1) {
+    const id = `${segment.id}${index === 0 ? 'a' : 'b'}`
+    const audioFile = `segment-${id}.m4a`
+    const stagedPath = path.join(segmentDirectory, staged[index])
+    const finalPath = path.join(segmentDirectory, audioFile)
+    await fs.promises.rename(stagedPath, finalPath)
+    const stats = await fs.promises.stat(finalPath)
+    if (Math.ceil(stats.size / 3) * 4 > transcriptMaxBase64Bytes) throw transcriptFailure('audio_segment_too_large', '细分后的音频仍超过 MiMo Base64 安全大小。')
+    children.push({ id, audioFile, durationSeconds: midpointSeconds, splitDepth: nextDepth, sizeBytes: stats.size })
+  }
+  return children
+}
+
+async function runTranscriptTask(task) {
+  const startedAt = Date.now()
+  const ownedWorkDirectory = path.join(transcriptWorkDirectory, task.id)
+  const sourceDownloadDirectory = path.join(ownedWorkDirectory, 'source-audio')
+  const segmentDirectory = path.join(ownedWorkDirectory, 'audio-segments')
+  let sourceAudio = null
+  let checkpoint = null
+  let segments = []
+  task.status = 'running'
+  task.phase = '准备音频'
+  task.error = ''
+  task.completedAt = null
+  task.attempt = (task.attempt || 0) + 1
+  task.outputPath = ''
+  task.fileSize = 0
+  saveLocalState()
+  log('info', 'Transcript task started', { taskId: task.id, bvid: task.bvid, mode: task.mode })
+  startTranscriptWakeLock(task)
+  try {
+    if (!mimoApiKey) throw transcriptFailure('mimo_key_missing', '请先在设置中配置 MiMo API Key。')
+    const ffmpegPath = findFFmpeg()
+    if (!ffmpegPath) throw transcriptFailure('ffmpeg_unavailable', '未找到 FFmpeg，请安装后重试转写。')
+    await ensureWritableDirectory(transcriptDirectory)
+    await fs.promises.mkdir(ownedWorkDirectory, { recursive: true })
+    await fs.promises.mkdir(sourceDownloadDirectory, { recursive: true })
+    sourceAudio = matchingCompletedAudio(task)
+    if (sourceAudio) {
+      log('info', 'Transcript audio reused', { taskId: task.id, bvid: task.bvid, source: 'completed-audio-download' })
+    } else {
+      if (!fs.existsSync(executablePath)) throw transcriptFailure('bbdown_unavailable', '未找到 BBDownNext，无法获取转写音频。')
+      const previousAudioFiles = await listMediaFiles(sourceDownloadDirectory, 'audio')
+      if (previousAudioFiles.length) {
+        sourceAudio = previousAudioFiles[0].path
+        log('info', 'Transcript temporary audio reused', { taskId: task.id, bvid: task.bvid, fileSize: previousAudioFiles[0].size })
+      } else {
+        const args = [task.url, '--get', 'a', '--work-dir', sourceDownloadDirectory, '--file-pattern', '<videoTitle>', '--stop-on-error', '--mux', 'None']
+        log('info', 'Transcript audio download started', { taskId: task.id, bvid: task.bvid })
+        await runTranscriptProcess(task, executablePath, args, '准备音频')
+        const audioFiles = await listMediaFiles(sourceDownloadDirectory, 'audio')
+        if (!audioFiles.length) throw transcriptFailure('transcript_audio_missing', 'BBDownNext 已结束，但没有找到音频文件。')
+        sourceAudio = audioFiles[0].path
+        log('info', 'Transcript audio downloaded temporarily', { taskId: task.id, bvid: task.bvid, fileSize: audioFiles[0].size })
+      }
+    }
+    if (task.cancelRequested) throw transcriptFailure('transcript_cancelled', '任务已取消。')
+
+    const prompt = await fs.promises.readFile(transcriptPromptFile, 'utf8')
+    const sourceAudioHash = await hashFile(sourceAudio)
+    const promptHash = createHash('sha256').update(prompt).digest('hex')
+    const existingCheckpoint = readTranscriptCheckpoint(ownedWorkDirectory, task.id)
+    const checkpointMatches = existingCheckpoint
+      && existingCheckpoint.processingVersion === transcriptProcessingVersion
+      && existingCheckpoint.bvid === task.bvid
+      && existingCheckpoint.sourceAudioHash === sourceAudioHash
+      && existingCheckpoint.promptHash === promptHash
+    if (checkpointMatches) {
+      checkpoint = existingCheckpoint
+      const missingSegment = checkpoint.segments.find((segment) => !fs.existsSync(path.join(segmentDirectory, transcriptSegmentFilename(segment))))
+      if (missingSegment) throw transcriptFailure('checkpoint_audio_missing', '检查点中的临时音频片段缺失；为避免误用旧结果，任务已暂停。')
+      log('info', 'Transcript checkpoint restored', { taskId: task.id, bvid: task.bvid, completedSegments: checkpoint.completedSegments.length, segmentCount: checkpoint.segments.length })
+    } else {
+      if (existingCheckpoint) {
+        log('info', 'Transcript checkpoint invalidated', {
+          taskId: task.id, bvid: task.bvid,
+          reason: existingCheckpoint.processingVersion !== transcriptProcessingVersion ? 'audio_processing_changed'
+            : existingCheckpoint.sourceAudioHash !== sourceAudioHash ? 'source_audio_changed' : 'prompt_changed',
+        })
+      }
+      await clearTranscriptCheckpoint(ownedWorkDirectory)
+      await fs.promises.mkdir(segmentDirectory, { recursive: true })
+      const sourceDurationSeconds = probeAudioDuration(ffmpegPath, sourceAudio)
+      await runTranscriptProcess(task, ffmpegPath, [
+        '-hide_banner', '-loglevel', 'error', '-y', '-i', sourceAudio, '-map', '0:a:0', '-vn', '-ac', '1', '-ar', '16000', '-c:a', 'aac', '-b:a', transcriptBitrate,
+        '-movflags', '+faststart', path.join(segmentDirectory, 'prepared-audio.m4a'),
+      ], '音频处理中')
+      const preparedAudioPath = path.join(segmentDirectory, 'prepared-audio.m4a')
+      const preparedStats = await fs.promises.stat(preparedAudioPath).catch(() => null)
+      if (!preparedStats?.isFile()) throw transcriptFailure('transcript_audio_conversion_failed', 'FFmpeg 没有生成可转写的音频。')
+      const preparedBase64Size = Math.ceil(preparedStats.size / 3) * 4
+      const durationSeconds = sourceDurationSeconds || probeAudioDuration(ffmpegPath, preparedAudioPath) || 0
+      log('info', 'Transcript audio encoded', {
+        taskId: task.id, bvid: task.bvid, sourceDurationSeconds: durationSeconds || null,
+        fileSize: preparedStats.size, base64Size: preparedBase64Size, sampleRate: 16000, channels: 1, bitrate: transcriptBitrate,
+      })
+      segments = []
+      if (preparedBase64Size <= transcriptMaxBase64Bytes) {
+        const audioFile = 'segment-001.m4a'
+        await fs.promises.rename(preparedAudioPath, path.join(segmentDirectory, audioFile))
+        segments.push({ id: '001', audioFile, durationSeconds, splitDepth: 0, sizeBytes: preparedStats.size })
+      } else {
+        let partCount = Math.max(2, Math.ceil(preparedBase64Size / transcriptSegmentSafetyBase64Bytes))
+        let finalNames = []
+        while (partCount <= 256) {
+          for (const name of await fs.promises.readdir(segmentDirectory)) {
+            if (/^segment-\d{3}\.m4a$/i.test(name)) await fs.promises.rm(path.join(segmentDirectory, name), { force: true })
+          }
+          const segmentDuration = Math.ceil((durationSeconds || partCount * 600) / partCount)
+          const outputPattern = path.join(segmentDirectory, 'segment-%03d.m4a')
+          await runTranscriptProcess(task, ffmpegPath, [
+            '-hide_banner', '-loglevel', 'error', '-y', '-i', preparedAudioPath, '-map', '0:a:0', '-vn', '-ac', '1', '-ar', '16000', '-c:a', 'aac', '-b:a', transcriptBitrate,
+            '-f', 'segment', '-segment_format', 'mp4', '-segment_time', String(segmentDuration), '-segment_start_number', '1', '-reset_timestamps', '1', outputPattern,
+          ], '音频处理中')
+          finalNames = (await fs.promises.readdir(segmentDirectory))
+            .filter((name) => /^segment-\d{3}\.m4a$/i.test(name))
+            .sort((left, right) => left.localeCompare(right, 'en'))
+          const sizes = await Promise.all(finalNames.map((name) => fs.promises.stat(path.join(segmentDirectory, name))))
+          if (finalNames.length >= partCount && sizes.every((stats) => Math.ceil(stats.size / 3) * 4 <= transcriptMaxBase64Bytes)) break
+          partCount = Math.max(partCount + 1, Math.ceil(partCount * 1.25))
+        }
+        if (!finalNames.length || finalNames.some((name) => Math.ceil(fs.statSync(path.join(segmentDirectory, name)).size / 3) * 4 > transcriptMaxBase64Bytes)) {
+          throw transcriptFailure('audio_segment_too_large', '音频无法安全切分到 MiMo Base64 限制以内。')
+        }
+        for (let index = 0; index < finalNames.length; index += 1) {
+          const audioFile = finalNames[index]
+          const stats = await fs.promises.stat(path.join(segmentDirectory, audioFile))
+          const base64Size = Math.ceil(stats.size / 3) * 4
+          const segmentDuration = probeAudioDuration(ffmpegPath, path.join(segmentDirectory, audioFile)) || durationSeconds / finalNames.length
+          segments.push({
+            id: String(index + 1).padStart(3, '0'), audioFile,
+            durationSeconds: segmentDuration, splitDepth: 0, sizeBytes: stats.size,
+          })
+          log('info', 'Transcript audio segment prepared', {
+            taskId: task.id, bvid: task.bvid, segment: index + 1, segmentCount: finalNames.length,
+            durationSeconds: Math.round(segmentDuration * 100) / 100, fileSize: stats.size, base64Size,
+          })
+        }
+      }
+      checkpoint = {
+        processingVersion: transcriptProcessingVersion, taskId: task.id, bvid: task.bvid, sourceAudioHash, promptHash,
+        segmentCount: segments.length, segments, completedSegments: [], currentSegment: null,
+        createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+      }
+      saveTranscriptCheckpoint(ownedWorkDirectory, checkpoint)
+      log('info', 'Transcript audio prepared', {
+        taskId: task.id, bvid: task.bvid, sourceDurationSeconds: durationSeconds ? Math.round(durationSeconds) : null,
+        segmentCount: segments.length, sampleRate: 16000, channels: 1, bitrate: transcriptBitrate, base64Size: preparedBase64Size,
+      })
+    }
+
+    segments = [...checkpoint.segments]
+    const completed = new Set(checkpoint.completedSegments.filter((id) => segments.some((segment) => segment.id === id)))
+    for (const segment of segments) {
+      if (fs.existsSync(path.join(ownedWorkDirectory, `segment-${segment.id}.txt`))) completed.add(segment.id)
+    }
+    checkpoint.completedSegments = segments.filter((segment) => completed.has(segment.id)).map((segment) => segment.id)
+    checkpoint.segmentCount = segments.length
+    const firstPending = segments.findIndex((segment) => !completed.has(segment.id))
+    checkpoint.currentSegment = firstPending < 0 ? null : segments[firstPending].id
+    saveTranscriptCheckpoint(ownedWorkDirectory, checkpoint)
+    task.transcriptProgress = { completedSegments: completed.size, segmentCount: segments.length, currentSegment: checkpoint.currentSegment }
+    if (firstPending >= 0 && completed.size > 0) {
+      setTranscriptPhase(task, `已恢复进度，继续转写 ${firstPending + 1} / ${segments.length}`)
+    } else if (firstPending >= 0) {
+      setTranscriptPhase(task, `转写 ${firstPending + 1} / ${segments.length}`)
+    }
+
+    let cursor = 0
+    while (cursor < segments.length) {
+      if (task.cancelRequested) throw transcriptFailure('transcript_cancelled', '任务已取消。')
+      const segment = segments[cursor]
+      if (completed.has(segment.id)) { cursor += 1; continue }
+      checkpoint.currentSegment = segment.id
+      checkpoint.segmentCount = segments.length
+      task.transcriptProgress = { completedSegments: completed.size, segmentCount: segments.length, currentSegment: segment.id }
+      const resumedSegment = completed.size > 0 && cursor === firstPending
+      setTranscriptPhase(task, resumedSegment ? `已恢复进度，继续转写 ${cursor + 1} / ${segments.length}` : `转写 ${cursor + 1} / ${segments.length}`)
+      saveTranscriptCheckpoint(ownedWorkDirectory, checkpoint)
+      log('info', 'MiMo transcript segment started', { taskId: task.id, bvid: task.bvid, segment: cursor + 1, segmentId: segment.id, segmentCount: segments.length })
+      const segmentStartedAt = Date.now()
+      try {
+        const audioPath = path.join(segmentDirectory, transcriptSegmentFilename(segment))
+        const text = await callMiMoForSegment(task, prompt, audioPath, cursor + 1, segments.length)
+        writeTranscriptSegmentText(ownedWorkDirectory, segment.id, text)
+        completed.add(segment.id)
+        checkpoint.completedSegments = segments.filter((item) => completed.has(item.id)).map((item) => item.id)
+        checkpoint.currentSegment = segments[cursor + 1]?.id || null
+        task.transcriptProgress = { completedSegments: completed.size, segmentCount: segments.length, currentSegment: checkpoint.currentSegment }
+        saveTranscriptCheckpoint(ownedWorkDirectory, checkpoint)
+        saveLocalState()
+        log('info', 'MiMo transcript segment completed', {
+          taskId: task.id, bvid: task.bvid, segment: cursor + 1, segmentId: segment.id,
+          model: 'mimo-v2.6-flash', durationMs: Date.now() - segmentStartedAt, textLength: text.length,
+        })
+        cursor += 1
+      } catch (error) {
+        if (error.code !== 'mimo_output_truncated') throw error
+        const children = await splitTranscriptSegment(task, ffmpegPath, ownedWorkDirectory, segment)
+        segments.splice(cursor, 1, ...children)
+        checkpoint.segments = segments
+        checkpoint.segmentCount = segments.length
+        checkpoint.currentSegment = children[0].id
+        task.transcriptProgress = { completedSegments: completed.size, segmentCount: segments.length, currentSegment: children[0].id }
+        saveTranscriptCheckpoint(ownedWorkDirectory, checkpoint)
+        await fs.promises.rm(path.join(segmentDirectory, transcriptSegmentFilename(segment)), { force: true })
+        log('warn', 'Truncated transcript segment split for retry', {
+          taskId: task.id, bvid: task.bvid, segmentId: segment.id, segmentCount: segments.length,
+          childSegments: children.map((item) => item.id),
+        })
+      }
+    }
+    if (task.cancelRequested) throw transcriptFailure('transcript_cancelled', '任务已取消。')
+    let text
+    if (segments.length === 1) {
+      text = cleanTranscriptText(await fs.promises.readFile(path.join(ownedWorkDirectory, `segment-${segments[0].id}.txt`), 'utf8'))
+    } else {
+      setTranscriptPhase(task, '整理结果')
+      const results = []
+      for (const segment of segments) {
+        results.push(await fs.promises.readFile(path.join(ownedWorkDirectory, `segment-${segment.id}.txt`), 'utf8'))
+      }
+      text = mergeTranscriptSegments(results)
+    }
+    if (!text) throw transcriptFailure('transcript_empty', '转写结果为空，未保存文字稿。')
+    setTranscriptPhase(task, '保存文字稿')
+    const outputDirectory = transcriptOutputDirectory(task)
+    await ensureWritableDirectory(outputDirectory)
+    const fileName = `${safeDirectoryName(task.title, 120)}.txt`
+    const outputPath = path.join(outputDirectory, fileName)
+    await fs.promises.writeFile(outputPath, `${text}\n`, 'utf8')
+    const completedAt = new Date().toISOString()
+    const entry = {
+      id: task.id, title: task.title, creator: task.creatorName || task.owner || '未知 UP 主', bvid: task.bvid,
+      completedAt, textPath: outputPath, text, wordCount: Array.from(text.replace(/\s/gu, '')).length,
+    }
+    const library = readTranscriptLibrary().filter((item) => item.id !== task.id)
+    library.push(entry)
+    writeTranscriptLibrary(library)
+    task.status = 'completed'
+    task.phase = '已完成'
+    task.outputPath = outputPath
+    task.fileSize = Buffer.byteLength(text, 'utf8')
+    task.completedAt = completedAt
+    log('info', 'Transcript task completed', { taskId: task.id, bvid: task.bvid, outputPath, segmentCount: segments.length, wordCount: entry.wordCount, durationMs: Date.now() - startedAt })
+    const resolvedWorkRoot = path.resolve(transcriptWorkDirectory)
+    const resolvedWorkDirectory = path.resolve(ownedWorkDirectory)
+    if (resolvedWorkDirectory.startsWith(`${resolvedWorkRoot}${path.sep}`)) {
+      await fs.promises.rm(ownedWorkDirectory, { recursive: true, force: true })
+    }
+  } catch (error) {
+    if (task.cancelRequested || error.code === 'transcript_cancelled') {
+      task.status = 'cancelled'
+      task.phase = '已取消'
+      task.error = '转写任务已取消。'
+      task.completedAt = new Date().toISOString()
+      log('info', 'Transcript task cancelled', { taskId: task.id, bvid: task.bvid, durationMs: Date.now() - startedAt })
+    } else {
+      task.status = 'failed'
+      task.phase = '转写失败'
+      task.error = error.message || '转写失败，请稍后重试。'
+      task.completedAt = new Date().toISOString()
+      log('error', 'Transcript task failed', { taskId: task.id, bvid: task.bvid, code: error.code || 'transcript_error', reason: task.error, durationMs: Date.now() - startedAt })
+    }
+  } finally {
+    stopTranscriptWakeLock()
+    activeTaskAbortController = null
+    task.cancelRequested = false
+    if (activeDownloadChild && activeDownloadChild.exitCode !== null) {
+      childProcesses.delete(activeDownloadChild)
+      activeDownloadChild = null
+    }
+    saveLocalState()
+  }
+}
+
 async function pumpDownloadQueue() {
   if (queuePumpActive || shuttingDown) return
   queuePumpActive = true
@@ -1078,7 +1834,7 @@ async function pumpDownloadQueue() {
       const next = getDownloadTasks().find((task) => task.status === 'waiting')
       if (!next) break
       activeDownloadTaskId = next.id
-      await runDownloadTask(next)
+      await (next.mode === 'transcript' ? runTranscriptTask(next) : runDownloadTask(next))
       activeDownloadTaskId = null
     }
   } finally {
@@ -1091,8 +1847,8 @@ async function pumpDownloadQueue() {
 
 async function createDownloadTask(request, response) {
   const body = await readJsonBody(request)
-  if (!['video', 'audio'].includes(body.mode)) {
-    sendError(response, 400, 'invalid_download_mode', '目前只支持下载视频或音频。')
+  if (!['video', 'audio', 'transcript'].includes(body.mode)) {
+    sendError(response, 400, 'invalid_download_mode', '请选择有效的任务类型。')
     return
   }
   const { bvid, canonicalUrl } = normalizeVideoUrl(body.url)
@@ -1107,15 +1863,15 @@ async function createDownloadTask(request, response) {
   }
   downloadTasks.set(task.id, task)
   saveLocalState()
-  log('info', 'Download task created', { taskId: task.id, bvid, mode: task.mode })
+  log('info', task.mode === 'transcript' ? 'Transcript task created' : 'Download task created', { taskId: task.id, bvid, mode: task.mode })
   sendJson(response, 201, { task })
   void pumpDownloadQueue()
 }
 
 async function createBatchDownloadTasks(request, response) {
   const body = await readJsonBody(request, 2 * 1024 * 1024)
-  if (!['video', 'audio'].includes(body.mode)) {
-    sendError(response, 400, 'invalid_download_mode', '目前只支持批量下载视频或音频。')
+  if (!['video', 'audio', 'transcript'].includes(body.mode)) {
+    sendError(response, 400, 'invalid_download_mode', '请选择有效的批量任务类型。')
     return
   }
   if (!Array.isArray(body.videos) || !body.videos.length || body.videos.length > 3000) {
@@ -1142,7 +1898,7 @@ async function createBatchDownloadTasks(request, response) {
   }))
   for (const task of tasks) downloadTasks.set(task.id, task)
   saveLocalState()
-  log('info', 'Creator batch download tasks created', { count: tasks.length, mode: body.mode })
+  log('info', body.mode === 'transcript' ? 'Creator batch transcript tasks created' : 'Creator batch download tasks created', { count: tasks.length, mode: body.mode })
   sendJson(response, 201, { tasks: tasks.map(({ id, bvid, title, owner, mode, status, createdAt }) => ({ id, bvid, title, owner, mode, status, createdAt })) })
   void pumpDownloadQueue()
 }
@@ -1169,6 +1925,103 @@ async function saveDownloadDirectory(request, response) {
   saveLocalState()
   log('info', 'Download directory saved', { downloadDirectory })
   sendJson(response, 200, { downloadDirectory })
+}
+
+async function saveAppSettings(request, response) {
+  const body = await readJsonBody(request)
+  if ((typeof body.downloadDirectory === 'string' && body.downloadDirectory.trim() && !path.isAbsolute(body.downloadDirectory.trim()))
+    || (typeof body.transcriptDirectory === 'string' && body.transcriptDirectory.trim() && !path.isAbsolute(body.transcriptDirectory.trim()))) {
+    sendError(response, 400, 'invalid_settings_path', '保存目录必须是本机绝对路径。')
+    return
+  }
+  const nextDownload = typeof body.downloadDirectory === 'string' && body.downloadDirectory.trim() ? path.resolve(body.downloadDirectory.trim()) : downloadDirectory
+  const nextTranscript = typeof body.transcriptDirectory === 'string' && body.transcriptDirectory.trim() ? path.resolve(body.transcriptDirectory.trim()) : transcriptDirectory
+  if (!path.isAbsolute(nextDownload) || !path.isAbsolute(nextTranscript)) {
+    sendError(response, 400, 'invalid_settings_path', '保存目录必须是本机绝对路径。')
+    return
+  }
+  try {
+    await ensureWritableDirectory(nextDownload)
+    await ensureWritableDirectory(nextTranscript)
+  } catch (error) {
+    sendError(response, 400, error.code || 'settings_directory_unwritable', error.message || '保存目录不可写。')
+    return
+  }
+  if (typeof body.apiKey === 'string' && body.apiKey.trim()) {
+    try { saveMimoApiKey(body.apiKey.trim()) } catch (error) {
+      log('error', 'MiMo API Key could not be saved', { code: error.code || 'mimo_key_save_failed' })
+      sendError(response, 500, 'mimo_key_save_failed', 'MiMo API Key 保存失败。')
+      return
+    }
+  }
+  if (body.apiKey === null) {
+    sendError(response, 400, 'invalid_mimo_api_key', 'MiMo API Key 不能为空。')
+    return
+  }
+  downloadDirectory = nextDownload
+  transcriptDirectory = nextTranscript
+  saveLocalState()
+  log('info', 'Local settings saved', { hasMimoApiKey: !!mimoApiKey, downloadDirectory, transcriptDirectory })
+  sendJson(response, 200, { downloadDirectory, transcriptDirectory, mimoApiKeyConfigured: !!mimoApiKey, mimoApiKeyMask: maskMimoApiKey() })
+}
+
+async function testMiMoConnection(request, response) {
+  const body = await readJsonBody(request)
+  const key = typeof body.apiKey === 'string' && body.apiKey.trim() ? body.apiKey.trim() : mimoApiKey
+  if (!key) {
+    sendError(response, 400, 'mimo_key_missing', '请先填写 MiMo API Key。')
+    return
+  }
+  await withMiMoRequestLock(async () => {
+  try {
+    const result = await fetch('https://api.xiaomimimo.com/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'api-key': key },
+      body: JSON.stringify({
+        model: 'mimo-v2.6-flash',
+        stream: false,
+        thinking: { type: 'disabled' },
+        max_completion_tokens: 16,
+        messages: [{ role: 'user', content: 'Reply with the single word OK.' }],
+      }),
+      signal: AbortSignal.timeout(30_000),
+    })
+    log('info', 'MiMo connection test response', { status: result.status })
+    if (!result.ok) {
+      const error = transcriptErrorForStatus(result.status)
+      sendError(response, result.status === 401 || result.status === 403 ? 401 : result.status === 429 ? 429 : 502, error.code, error.message)
+      return
+    }
+    let payload
+    try { payload = await result.json() } catch {
+      sendError(response, 502, 'mimo_invalid_response', 'MiMo 返回格式异常。')
+      return
+    }
+    if (String(payload?.model || '').toLowerCase() !== 'mimo-v2.6-flash' || payload?.choices?.[0]?.finish_reason !== 'stop' || !payload?.choices?.[0]?.message?.content?.trim()) {
+      sendError(response, 502, 'mimo_invalid_response', 'MiMo 返回结果不完整，请稍后重试。')
+      return
+    }
+    sendJson(response, 200, { success: true, message: '连接成功', mimoApiKeyConfigured: !!mimoApiKey, mimoApiKeyMask: maskMimoApiKey(key) })
+  } catch (error) {
+    const timeout = error.name === 'TimeoutError' || error.name === 'AbortError'
+    log('warn', 'MiMo connection test failed', { code: timeout ? 'mimo_timeout' : 'mimo_network_error' })
+    sendError(response, 502, timeout ? 'mimo_timeout' : 'mimo_network_error', timeout ? 'MiMo 连接超时，请稍后重试。' : '无法连接 MiMo 服务，请检查网络后重试。')
+  }
+  })
+}
+
+async function listTranscripts(response) {
+  const entries = readTranscriptLibrary().sort((left, right) => String(right.completedAt).localeCompare(String(left.completedAt)))
+  const transcripts = []
+  for (const item of entries) {
+    try {
+      const text = await fs.promises.readFile(item.textPath, 'utf8')
+      transcripts.push({ ...item, text })
+    } catch (error) {
+      if (error.code !== 'ENOENT') log('warn', 'Transcript file could not be read', { transcriptId: item.id, code: error.code || 'transcript_read_failed' })
+    }
+  }
+  sendJson(response, 200, { transcripts })
 }
 
 async function handleTaskAction(request, response, method, pathname) {
@@ -1214,6 +2067,7 @@ async function handleTaskAction(request, response, method, pathname) {
     saveLocalState()
     log('info', 'Download task cancellation requested', { taskId: id, bvid: task.bvid })
     killDownloadTree(activeDownloadChild)
+    activeTaskAbortController?.abort('cancelled')
     sendJson(response, 200, { task })
     return true
   }
@@ -1247,7 +2101,8 @@ async function handleTaskAction(request, response, method, pathname) {
     sendJson(response, 200, { opened: true, located: isFile, targetType })
     return true
   }
-  if (method === 'POST' && action === 'retry' && task.status === 'failed') {
+  const retryableTask = task.status === 'failed' || (task.status === 'cancelled' && task.mode === 'transcript')
+  if (method === 'POST' && action === 'retry' && retryableTask) {
     task.status = 'waiting'
     task.phase = '等待中'
     task.error = ''
@@ -1370,6 +2225,17 @@ const server = http.createServer(async (request, response) => {
     } else if (method === 'POST' && pathname === '/api/creators/parse') {
       await parseCreatorHomepage(request, response)
       statusCode = response.statusCode || 200
+    } else if (method === 'GET' && pathname === '/api/settings') {
+      sendJson(response, 200, { downloadDirectory, transcriptDirectory, mimoApiKeyConfigured: !!mimoApiKey, mimoApiKeyMask: maskMimoApiKey() })
+    } else if (method === 'PUT' && pathname === '/api/settings') {
+      await saveAppSettings(request, response)
+      statusCode = response.statusCode || 200
+    } else if (method === 'POST' && pathname === '/api/settings/mimo/test') {
+      await testMiMoConnection(request, response)
+      statusCode = response.statusCode || 200
+    } else if (method === 'GET' && pathname === '/api/transcripts') {
+      await listTranscripts(response)
+      statusCode = response.statusCode || 200
     } else if (method === 'GET' && pathname === '/api/settings/download') {
       sendJson(response, 200, { downloadDirectory })
     } else if (method === 'PUT' && pathname === '/api/settings/download') {
@@ -1377,7 +2243,7 @@ const server = http.createServer(async (request, response) => {
       statusCode = response.statusCode || 200
     } else if (pathname.startsWith('/api/tasks')) {
       const handled = await handleTaskAction(request, response, method, pathname)
-      if (!handled) {
+      if (!handled && !response.headersSent) {
         statusCode = 404
         sendError(response, 404, 'not_found', '找不到此本地 API。')
       } else statusCode = response.statusCode || 200
@@ -1431,12 +2297,17 @@ const server = http.createServer(async (request, response) => {
       sendError(response, 404, 'not_found', '找不到此本地 API。')
     }
   } catch (error) {
-    statusCode = error.statusCode || 500
-    log(statusCode >= 500 ? 'error' : 'warn', 'API request error', {
-      method, path: pathname, statusCode, code: error.code || 'request_error', message: error.message, stack: error.stack,
-    })
-    if (!response.headersSent) sendError(response, statusCode, error.code || 'request_error', error.message || '本地后台请求失败。')
-    else response.destroy()
+    if (response.headersSent || response.writableEnded) {
+      statusCode = response.statusCode || 200
+      log('warn', 'API handler failed after response was sent', { method, path: pathname, code: error.code || 'request_error' })
+      if (!response.writableEnded) response.destroy()
+    } else {
+      statusCode = error.statusCode || 500
+      log(statusCode >= 500 ? 'error' : 'warn', 'API request error', {
+        method, path: pathname, statusCode, code: error.code || 'request_error', message: error.message, stack: error.stack,
+      })
+      sendError(response, statusCode, error.code || 'request_error', error.message || '本地后台请求失败。')
+    }
   } finally {
     log(statusCode >= 500 ? 'warn' : 'info', 'API request completed', { method, path: pathname, statusCode, durationMs: Date.now() - startedAt })
   }
@@ -1512,6 +2383,8 @@ function shutdown(signal) {
   if (shuttingDown) return
   shuttingDown = true
   log('info', 'BiliScribe backend stopping', { signal })
+  activeTaskAbortController?.abort('shutdown')
+  stopTranscriptWakeLock()
   for (const child of childProcesses) child.kill()
   server.close(() => {
     log('info', 'BiliScribe backend stopped', { signal })
