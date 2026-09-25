@@ -53,8 +53,6 @@ button:disabled { cursor: not-allowed; opacity: .52; }
 .queue-count { margin-left: auto; color: #5c6b7e; font-size: 10px; font-weight: 700; }
 .queue-card-title { margin-top: 13px; color: #28364a; font-size: 12px; font-weight: 600; }
 .queue-card-meta { display: flex; justify-content: space-between; margin-top: 4px; color: #909baa; font-size: 10px; }
-.mini-progress { height: 3px; overflow: hidden; margin-top: 10px; border-radius: 4px; background: #eaf0f5; }
-.mini-progress span { display: block; height: 100%; border-radius: inherit; background: #1493e6; transition: width .5s linear; }
 .sidebar-footer { display: flex; align-items: center; gap: 9px; padding: 10px 4px 2px; border-top: 1px solid #eff2f5; }
 .avatar { display: grid; width: 31px; height: 31px; place-items: center; border-radius: 50%; background: #e3f4fc; color: #168abd; font-size: 13px; font-weight: 700; }
 .sidebar-footer > div { display: flex; flex: 1; flex-direction: column; gap: 2px; }
@@ -302,8 +300,6 @@ h1 { margin: 0; color: #1d2b3c; font-size: 23px; font-weight: 700; letter-spacin
 .task-progress-line { display: flex; align-items: center; gap: 8px; margin-top: 10px; color: #748195; font-size: 8px; }
 .task-progress-line > span { width: 27px; }
 .task-progress-line small { color: #a1aab5; font-size: 8px; }
-.progress-track { width: min(240px, 37%); height: 4px; overflow: hidden; border-radius: 5px; background: #edf1f4; }
-.progress-track span { display: block; height: 100%; border-radius: inherit; background: linear-gradient(90deg, #1490dc, #43b0de); transition: width .8s linear; }
 .cancel-button { display: inline-flex; height: 27px; flex: 0 0 auto; align-items: center; gap: 4px; padding: 0 8px; border: 1px solid #e7ebef; border-radius: 6px; background: #fff; color: #8894a1; cursor: pointer; font-size: 8px; }
 .cancel-button:hover { border-color: #f0d3d0; background: #fff9f8; color: #cf6d68; }
 .queue-index { width: 20px; color: #aab3bd; font-size: 9px; text-align: center; }
@@ -428,7 +424,6 @@ h1 { margin: 0; color: #1d2b3c; font-size: 23px; font-weight: 700; letter-spacin
 .path-setting > div:first-child span { display: block; margin-top: 4px; color: #a0aab5; font-size: 8px; }
 .path-control { display: flex; gap: 6px; }
 .path-control input { width: 100%; min-width: 0; height: 31px; padding: 0 8px; border: 1px solid #e8edf1; border-radius: 5px; background: #fbfcfd; color: #758296; font-size: 9px; }
-.path-button { height: 31px; }
 .folder-tip { margin-top: 3px; }
 .compact-settings { padding-bottom: 14px; }
 .queue-setting-line { display: flex; align-items: center; justify-content: space-between; margin-top: 15px; padding-top: 12px; border-top: 1px solid #edf0f3; color: #758295; font-size: 9px; }
@@ -624,9 +619,9 @@ h1 { color: #1f2e42; font-size: 26px; letter-spacing: -.45px; }
 .task-subtitle { margin-top: 7px; color: #5d6f84; font-size: 13px; }
 .task-progress-line { gap: 10px; margin-top: 13px; color: #42556b; font-size: 14px; }
 .task-progress-line > span { width: 44px; font-weight: 650; }
+.task-progress-line > .phase-indicator { width: 9px; height: 9px; flex: 0 0 auto; border-radius: 50%; background: #1789db; box-shadow: 0 0 0 3px #e7f4fd; }
+.task-progress-line > span:last-child { width: auto; font-weight: 550; }
 .task-progress-line small { color: #5f7084; font-size: 12px; }
-.progress-track { width: min(360px, 48%); height: 7px; background: #e1e9ef; }
-.progress-track span { background: #1686d0; }
 .cancel-button, .remove-button, .retry-button { height: 36px; padding: 0 11px; color: #53657a; font-size: 13px; }
 .waiting-row { min-height: 78px; }
 .waiting-row .task-title-row > strong, .history-row .task-title-row > strong { color: #3c4d62; font-size: 15px; }
@@ -634,6 +629,8 @@ h1 { color: #1f2e42; font-size: 26px; letter-spacing: -.45px; }
 .history-group { padding-bottom: 12px; background: #fbfcfd; }
 .history-row { min-height: 72px; }
 .history-row .task-subtitle { color: #6c7b8d; }
+.task-output-path { overflow: hidden; margin-top: 4px; color: #72839a; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.task-open-button { height: 34px; flex: 0 0 auto; padding: 0 10px; font-size: 12px; }
 .empty-inline { min-height: 70px; color: #617186; font-size: 14px; }
 .task-footnote { color: #5e7085; font-size: 13px; }
 .task-empty { min-height: 280px; }
@@ -703,7 +700,6 @@ h1 { color: #1f2e42; font-size: 26px; letter-spacing: -.45px; }
 .path-setting { grid-template-columns: 190px minmax(0, 1fr); gap: 16px; padding: 14px 0; }
 .path-setting > div:first-child span { color: #617287; font-size: 12px; }
 .path-control input { height: 40px; color: #43566d; font-size: 14px; }
-.path-button { height: 40px; }
 .queue-setting-line { color: #52647a; font-size: 14px; }
 .locked-mini { color: #5f7085; font-size: 11px; }
 .unsaved-pill { font-size: 12px; }

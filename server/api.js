@@ -3,6 +3,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { spawn, spawnSync } from 'node:child_process'
 import net from 'node:net'
+import os from 'node:os'
 import { randomBytes, randomUUID } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 import { getLogDirectory, getLogPath, log, readCompleteLog, readRecentLogLines } from './logger.js'
@@ -21,6 +22,46 @@ let bbdownServeToken = null
 let bbdownServeStarting = null
 const productionMode = process.argv.includes('--production')
 const distDirectory = path.join(projectRoot, 'dist')
+const stateDirectory = path.join(projectRoot, '.biliscribe')
+const stateFile = path.join(stateDirectory, 'state.json')
+const defaultDownloadDirectory = path.join(os.homedir(), 'Videos', 'BiliScribe')
+const mediaExtensions = new Set(['.mp4', '.mkv', '.flv', '.m4a', '.mka', '.mp3', '.aac', '.wav', '.flac', '.m4s'])
+
+let downloadDirectory = defaultDownloadDirectory
+const downloadTasks = new Map()
+let queuePumpActive = false
+let activeDownloadChild = null
+let activeDownloadTaskId = null
+
+function saveLocalState() {
+  try {
+    fs.mkdirSync(stateDirectory, { recursive: true })
+    const payload = JSON.stringify({ downloadDirectory, tasks: [...downloadTasks.values()] }, null, 2)
+    const temporary = `${stateFile}.${process.pid}.tmp`
+    fs.writeFileSync(temporary, `${payload}\n`, 'utf8')
+    fs.renameSync(temporary, stateFile)
+  } catch (error) {
+    log('error', 'Local task state save failed', { code: error.code || 'state_save_failed', message: error.message })
+  }
+}
+
+try {
+  const saved = JSON.parse(fs.readFileSync(stateFile, 'utf8'))
+  if (typeof saved.downloadDirectory === 'string' && saved.downloadDirectory.trim()) downloadDirectory = path.resolve(saved.downloadDirectory)
+  for (const task of Array.isArray(saved.tasks) ? saved.tasks : []) {
+    if (!task?.id || !['waiting', 'running', 'completed', 'failed', 'cancelled'].includes(task.status)) continue
+    if (task.status === 'running') {
+      task.status = 'failed'
+      task.phase = '后台关闭时任务中断'
+      task.error = 'BiliScribe 关闭时任务未完成，请重试。'
+      task.completedAt = new Date().toISOString()
+    }
+    downloadTasks.set(task.id, task)
+  }
+  saveLocalState()
+} catch (error) {
+  if (error.code !== 'ENOENT') log('warn', 'Local task state could not be loaded', { code: error.code || 'state_load_failed' })
+}
 
 if (productionMode && !fs.existsSync(path.join(distDirectory, 'index.html'))) {
   log('error', 'Production server could not start', { reason: 'built frontend dist/index.html is missing' })
@@ -435,6 +476,366 @@ async function fetchPublicVideoDetails(bvid) {
   return result.data
 }
 
+function getDownloadTasks() {
+  return [...downloadTasks.values()].sort((left, right) => left.createdAt.localeCompare(right.createdAt))
+}
+
+function findFFmpeg() {
+  const configuredPath = process.env.FFMPEG_PATH
+  if (configuredPath && fs.existsSync(configuredPath)) return configuredPath
+  if (process.platform === 'win32') {
+    const result = spawnSync('where.exe', ['ffmpeg.exe'], { encoding: 'utf8', timeout: 2500, windowsHide: true })
+    const candidate = (result.stdout || '').split(/\r?\n/).map((line) => line.trim()).find((line) => line && fs.existsSync(line))
+    if (candidate) return candidate
+  }
+  return null
+}
+
+async function ensureWritableDirectory(directory) {
+  const probePath = path.join(directory, `.biliscribe-write-test-${randomUUID()}.tmp`)
+  try {
+    await fs.promises.mkdir(directory, { recursive: true })
+    await fs.promises.writeFile(probePath, 'ok', { flag: 'wx' })
+  } catch (error) {
+    throw Object.assign(new Error(`下载目录无法创建或写入：${directory}。请检查路径和权限。`), { code: error.code || 'download_directory_unwritable' })
+  } finally {
+    try { await fs.promises.unlink(probePath) } catch { /* only remove the uniquely named probe file */ }
+  }
+}
+
+function safeDirectoryName(value) {
+  const cleaned = String(value || 'B站视频').replace(/[<>:"/\\|?*\u0000-\u001f]/g, '_').replace(/[. ]+$/g, '').trim()
+  return (cleaned || 'B站视频').slice(0, 72)
+}
+
+async function listMediaFiles(directory, mode) {
+  const allowed = mode === 'audio'
+    ? new Set(['.m4a', '.mka', '.mp3', '.aac', '.wav', '.flac'])
+    : new Set(['.mp4', '.mkv', '.flv'])
+  const files = []
+  async function walk(current) {
+    for (const entry of await fs.promises.readdir(current, { withFileTypes: true })) {
+      const entryPath = path.join(current, entry.name)
+      if (entry.isDirectory()) await walk(entryPath)
+      else if (entry.isFile() && allowed.has(path.extname(entry.name).toLowerCase())) {
+        const stat = await fs.promises.stat(entryPath)
+        if (stat.size > 0) files.push({ path: entryPath, size: stat.size })
+      }
+    }
+  }
+  await walk(directory)
+  return files.sort((left, right) => left.path.localeCompare(right.path))
+}
+
+function friendlyDownloadError(output, exitCode) {
+  if (/ffmpeg|混流|mux/i.test(output) && /not found|找不到|无法启动|missing|不存在/i.test(output)) {
+    return '合并媒体文件失败，请检查 FFmpeg 是否可用后重试。'
+  }
+  if (/-101|\b401\b|unauthori[sz]ed|登录状态已失效|请先登录|尚未登录|authentication failed|not logged in/i.test(output)) {
+    return 'B 站登录状态可能已失效，请重新扫码登录后重试。'
+  }
+  if (/视频不存在|未找到视频|not found|invalid video|无效的视频/i.test(output)) return '视频不存在或暂不可用，请检查链接后重试。'
+  if (/disk full|no space|磁盘空间不足/i.test(output)) return '保存位置空间不足，请清理磁盘后重试。'
+  if (exitCode === null) return 'BBDownNext 未能正常结束，请查看日志后重试。'
+  return `BBDownNext 下载失败（退出码 ${exitCode}），请检查网络或查看日志后重试。`
+}
+
+function updateDownloadPhase(task, phase) {
+  if (task.phase === phase) return
+  task.phase = phase
+  saveLocalState()
+  log('info', 'Download task phase changed', { taskId: task.id, bvid: task.bvid, mode: task.mode, phase })
+}
+
+function killDownloadTree(child) {
+  if (!child || child.exitCode !== null) return
+  if (process.platform === 'win32' && child.pid) {
+    const killer = spawn('taskkill.exe', ['/PID', String(child.pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore' })
+    killer.once('error', () => child.kill())
+    killer.once('close', (exitCode) => { if (exitCode !== 0) child.kill() })
+  } else {
+    child.kill('SIGTERM')
+  }
+}
+
+async function runDownloadTask(task) {
+  const startedAt = Date.now()
+  let child = null
+  task.status = 'running'
+  task.phase = '准备中'
+  task.progress = null
+  task.error = ''
+  task.completedAt = null
+  task.attempt = (task.attempt || 0) + 1
+  const safeTitle = safeDirectoryName(task.title)
+  task.outputDirectory = path.join(downloadDirectory, `${task.bvid} - ${safeTitle} (${task.attempt})`)
+  task.outputPath = ''
+  task.fileSize = 0
+  saveLocalState()
+  log('info', 'Download task started', { taskId: task.id, bvid: task.bvid, mode: task.mode })
+
+  try {
+    if (!fs.existsSync(executablePath)) throw Object.assign(new Error('未找到 BBDownNext，请确认 tools/BBDownNext/BBDown.exe 存在。'), { code: 'bbdown_unavailable' })
+    await ensureWritableDirectory(downloadDirectory)
+    await ensureWritableDirectory(task.outputDirectory)
+    if (task.cancelRequested) {
+      task.status = 'cancelled'
+      task.phase = '已取消'
+      task.error = '任务已取消；未自动删除可能残留的临时文件。'
+      return
+    }
+
+    const ffmpegPath = task.mode === 'video' ? findFFmpeg() : null
+    if (task.mode === 'video' && !ffmpegPath) {
+      throw Object.assign(new Error('下载完整视频需要 FFmpeg 合并音视频；请安装 FFmpeg 并加入 PATH 后重试。'), { code: 'ffmpeg_unavailable' })
+    }
+
+    const args = [task.url, '--get', task.mode === 'audio' ? 'a' : 'av', '--work-dir', task.outputDirectory, '--file-pattern', `[<bvid>] <videoTitle>`, '--stop-on-error']
+    if (task.mode === 'audio') args.push('--mux', 'None')
+    else args.push('--mux', 'Mpeg4', '--ffmpeg-path', ffmpegPath)
+
+    try {
+      child = spawn(executablePath, args, { cwd: path.dirname(executablePath), windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] })
+    } catch (error) {
+      throw Object.assign(new Error('BBDownNext 无法启动。'), { code: error.code || 'bbdown_spawn_failed' })
+    }
+    activeDownloadChild = child
+    childProcesses.add(child)
+    log('info', 'BBDownNext download process started', { taskId: task.id, bvid: task.bvid, mode: task.mode, executable: path.basename(executablePath) })
+    updateDownloadPhase(task, '下载中')
+
+    let output = ''
+    let pendingLine = ''
+    const collect = (chunk) => {
+      const text = chunk.toString('utf8')
+      if (output.length < 24_000) output += text.slice(0, 24_000 - output.length)
+      const segments = `${pendingLine}${text}`.split(/[\r\n]+/)
+      pendingLine = segments.pop() || ''
+      for (const line of segments) {
+        if (/混流|合并|mux|merge|ffmpeg/i.test(line)) updateDownloadPhase(task, '合并中')
+        else if (/下载|download|received|速度|speed/i.test(line)) updateDownloadPhase(task, '下载中')
+      }
+    }
+    child.stdout.on('data', collect)
+    child.stderr.on('data', collect)
+
+    const result = await new Promise((resolve, reject) => {
+      let settled = false
+      child.once('error', (error) => {
+        if (settled) return
+        settled = true
+        reject(error)
+      })
+      child.once('close', (exitCode, signal) => {
+        if (settled) return
+        settled = true
+        resolve({ exitCode, signal })
+      })
+    })
+    childProcesses.delete(child)
+    if (activeDownloadChild === child) activeDownloadChild = null
+
+    if (task.cancelRequested) {
+      task.status = 'cancelled'
+      task.phase = '已取消'
+      task.error = '任务已取消；未自动删除可能残留的临时文件。'
+      log('info', 'Download task cancelled', { taskId: task.id, bvid: task.bvid, outputDirectory: task.outputDirectory, durationMs: Date.now() - startedAt })
+      return
+    }
+    if (result.exitCode !== 0) {
+      task.status = 'failed'
+      task.phase = '下载失败'
+      task.error = friendlyDownloadError(output, result.exitCode)
+      task.completedAt = new Date().toISOString()
+      log('error', 'Download task failed', { taskId: task.id, bvid: task.bvid, mode: task.mode, exitCode: result.exitCode, signal: result.signal, reason: task.error, outputDirectory: task.outputDirectory, durationMs: Date.now() - startedAt })
+      return
+    }
+
+    const files = await listMediaFiles(task.outputDirectory, task.mode)
+    if (!files.length) {
+      task.status = 'failed'
+      task.phase = '未找到输出文件'
+      task.error = 'BBDownNext 已结束，但没有找到完整媒体文件；可能的临时文件已保留。'
+      task.completedAt = new Date().toISOString()
+      log('error', 'Download task output missing', { taskId: task.id, bvid: task.bvid, mode: task.mode, outputDirectory: task.outputDirectory, durationMs: Date.now() - startedAt })
+      return
+    }
+    task.status = 'completed'
+    task.phase = '已完成'
+    task.outputFiles = files.map((file) => file.path)
+    task.outputPath = files.length === 1 ? files[0].path : task.outputDirectory
+    task.fileSize = files.reduce((total, file) => total + file.size, 0)
+    task.completedAt = new Date().toISOString()
+    log('info', 'Download task completed', { taskId: task.id, bvid: task.bvid, mode: task.mode, outputPath: task.outputPath, outputFiles: files.length, fileSize: task.fileSize, durationMs: Date.now() - startedAt })
+  } catch (error) {
+    if (child && child.exitCode === null) killDownloadTree(child)
+    if (child) childProcesses.delete(child)
+    if (activeDownloadChild === child) activeDownloadChild = null
+    if (task.cancelRequested) {
+      task.status = 'cancelled'
+      task.phase = '已取消'
+      task.error = '任务已取消；未自动删除可能残留的临时文件。'
+      log('info', 'Download task cancelled', { taskId: task.id, bvid: task.bvid, outputDirectory: task.outputDirectory, durationMs: Date.now() - startedAt })
+    } else {
+      task.status = 'failed'
+      task.phase = '下载失败'
+      task.error = error.message || '本地下载失败。'
+      task.completedAt = new Date().toISOString()
+      log('error', 'Download task failed', { taskId: task.id, bvid: task.bvid, mode: task.mode, code: error.code || 'download_error', reason: task.error, outputDirectory: task.outputDirectory, stack: error.stack, durationMs: Date.now() - startedAt })
+    }
+  } finally {
+    if (activeDownloadChild && activeDownloadChild.exitCode !== null) {
+      childProcesses.delete(activeDownloadChild)
+      activeDownloadChild = null
+    }
+    task.cancelRequested = false
+    saveLocalState()
+  }
+}
+
+async function pumpDownloadQueue() {
+  if (queuePumpActive || shuttingDown) return
+  queuePumpActive = true
+  try {
+    while (!shuttingDown) {
+      const next = getDownloadTasks().find((task) => task.status === 'waiting')
+      if (!next) break
+      activeDownloadTaskId = next.id
+      await runDownloadTask(next)
+      activeDownloadTaskId = null
+    }
+  } finally {
+    queuePumpActive = false
+    activeDownloadTaskId = null
+    const waiting = getDownloadTasks().some((task) => task.status === 'waiting')
+    if (waiting && !shuttingDown) setImmediate(pumpDownloadQueue)
+  }
+}
+
+async function createDownloadTask(request, response) {
+  const body = await readJsonBody(request)
+  if (!['video', 'audio'].includes(body.mode)) {
+    sendError(response, 400, 'invalid_download_mode', '目前只支持下载视频或音频。')
+    return
+  }
+  const { bvid, canonicalUrl } = normalizeVideoUrl(body.url)
+  const task = {
+    id: randomUUID(), bvid, url: canonicalUrl,
+    title: String(body.title || bvid).slice(0, 300),
+    owner: String(body.owner || '未知 UP 主').slice(0, 120),
+    mode: body.mode, status: 'waiting', phase: '等待中', progress: null,
+    outputPath: '', outputDirectory: '', outputFiles: [], fileSize: 0,
+    error: '', createdAt: new Date().toISOString(), completedAt: null, attempt: 0,
+  }
+  downloadTasks.set(task.id, task)
+  saveLocalState()
+  log('info', 'Download task created', { taskId: task.id, bvid, mode: task.mode })
+  sendJson(response, 201, { task })
+  void pumpDownloadQueue()
+}
+
+async function saveDownloadDirectory(request, response) {
+  const body = await readJsonBody(request)
+  if (typeof body.downloadDirectory !== 'string' || !body.downloadDirectory.trim()) {
+    sendError(response, 400, 'invalid_download_directory', '请输入有效的下载目录。')
+    return
+  }
+  const requested = body.downloadDirectory.trim()
+  if (!path.isAbsolute(requested)) {
+    sendError(response, 400, 'invalid_download_directory', '下载目录必须是本机绝对路径。')
+    return
+  }
+  const resolved = path.resolve(requested)
+  try {
+    await ensureWritableDirectory(resolved)
+  } catch (error) {
+    sendError(response, 400, 'download_directory_unwritable', error.message || '下载目录不可写。')
+    return
+  }
+  downloadDirectory = resolved
+  saveLocalState()
+  log('info', 'Download directory saved', { downloadDirectory })
+  sendJson(response, 200, { downloadDirectory })
+}
+
+async function handleTaskAction(request, response, method, pathname) {
+  if (pathname === '/api/tasks' && method === 'GET') {
+    sendJson(response, 200, { tasks: getDownloadTasks(), downloadDirectory })
+    return
+  }
+  if (pathname === '/api/tasks' && method === 'POST') {
+    await createDownloadTask(request, response)
+    return
+  }
+  if (pathname === '/api/tasks/history' && method === 'DELETE') {
+    for (const [id, task] of downloadTasks) {
+      if (['completed', 'failed', 'cancelled'].includes(task.status)) downloadTasks.delete(id)
+    }
+    saveLocalState()
+    log('info', 'Download task history cleared')
+    sendJson(response, 200, { tasks: getDownloadTasks() })
+    return
+  }
+  const match = pathname.match(/^\/api\/tasks\/([0-9a-f-]{36})(?:\/(cancel|retry|open))?$/i)
+  if (!match) return false
+  const [, id, action] = match
+  const task = downloadTasks.get(id)
+  if (!task) {
+    sendError(response, 404, 'task_not_found', '找不到此任务。')
+    return true
+  }
+  if (method === 'DELETE' && !action && task.status === 'waiting') {
+    downloadTasks.delete(id)
+    saveLocalState()
+    log('info', 'Waiting download task removed', { taskId: id, bvid: task.bvid })
+    sendJson(response, 200, { removed: true })
+    return true
+  }
+  if (method === 'POST' && action === 'cancel' && task.status === 'running' && id === activeDownloadTaskId) {
+    task.cancelRequested = true
+    task.phase = '正在取消'
+    saveLocalState()
+    log('info', 'Download task cancellation requested', { taskId: id, bvid: task.bvid })
+    killDownloadTree(activeDownloadChild)
+    sendJson(response, 200, { task })
+    return true
+  }
+  if (method === 'POST' && action === 'open' && task.status === 'completed' && task.outputPath) {
+    if (process.platform !== 'win32') {
+      sendError(response, 501, 'unsupported_platform', '打开文件位置仅支持 Windows。')
+      return true
+    }
+    if (!fs.existsSync(task.outputPath)) {
+      sendError(response, 404, 'output_not_found', '下载文件已不存在，请检查保存目录。')
+      return true
+    }
+    const target = fs.statSync(task.outputPath).isFile() ? `/select,${task.outputPath}` : task.outputPath
+    const explorer = spawn('explorer.exe', [target], { detached: true, stdio: 'ignore', windowsHide: false })
+    await new Promise((resolve, reject) => {
+      explorer.once('spawn', resolve)
+      explorer.once('error', reject)
+    })
+    explorer.unref()
+    sendJson(response, 200, { opened: true })
+    return true
+  }
+  if (method === 'POST' && action === 'retry' && task.status === 'failed') {
+    task.status = 'waiting'
+    task.phase = '等待中'
+    task.error = ''
+    task.completedAt = null
+    task.progress = null
+    task.cancelRequested = false
+    saveLocalState()
+    log('info', 'Failed download task retried', { taskId: id, bvid: task.bvid, mode: task.mode })
+    sendJson(response, 200, { task })
+    void pumpDownloadQueue()
+    return true
+  }
+  sendError(response, 409, 'invalid_task_action', '任务当前状态不支持此操作。')
+  return true
+}
+
 async function parseSingleVideo(request, response) {
   const body = await readJsonBody(request)
   const { bvid, canonicalUrl } = normalizeVideoUrl(body.url)
@@ -535,6 +936,17 @@ const server = http.createServer(async (request, response) => {
     } else if (method === 'POST' && pathname === '/api/videos/parse') {
       await parseSingleVideo(request, response)
       statusCode = response.statusCode || 200
+    } else if (method === 'GET' && pathname === '/api/settings/download') {
+      sendJson(response, 200, { downloadDirectory })
+    } else if (method === 'PUT' && pathname === '/api/settings/download') {
+      await saveDownloadDirectory(request, response)
+      statusCode = response.statusCode || 200
+    } else if (pathname.startsWith('/api/tasks')) {
+      const handled = await handleTaskAction(request, response, method, pathname)
+      if (!handled) {
+        statusCode = 404
+        sendError(response, 404, 'not_found', '找不到此本地 API。')
+      } else statusCode = response.statusCode || 200
     } else if (method === 'GET' && pathname === '/api/bilibili/login') {
       const login = await getLoginStatus()
       if (login.loggedIn) log('info', 'Bilibili login status restored', { hasAccountName: !!login.account?.name })
@@ -658,6 +1070,7 @@ server.listen(port, '127.0.0.1', () => {
     bbdownVersion,
   })
   console.log(`BiliScribe API: http://127.0.0.1:${port}`)
+  void pumpDownloadQueue()
 })
 
 let shuttingDown = false

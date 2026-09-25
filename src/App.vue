@@ -20,7 +20,7 @@ const navItems = [
 const page = ref('new')
 const toast = ref('')
 let toastTimer
-let progressTimer
+let taskPollTimer
 
 function notify(message) {
   toast.value = message
@@ -178,54 +178,67 @@ const taskNames = { video: '视频下载', audio: '音频下载', transcript: '�
 const taskIcon = { video: Film, audio: AudioLines, transcript: FileText }
 const CalendarIcon = CalendarDays
 const SlidersIcon = SlidersHorizontal
-let nextTaskId = 10
-const tasks = ref([
-  { id: 1, title: '八字入门第一课：四柱与五行基础概念', owner: '山间命理课', mode: 'video', status: 'running', progress: 42, size: '286 MB' },
-  { id: 2, title: '天干地支怎么记？一张图理解五行关系', owner: '山间命理课', mode: 'audio', status: 'waiting', progress: 0, size: '—' },
-  { id: 3, title: '排盘的基本方法：年柱、月柱、日柱与时柱', owner: '山间命理课', mode: 'transcript', status: 'waiting', progress: 0, size: '—' },
-  { id: 4, title: '阴阳五行之间的生克关系', owner: '山间命理课', mode: 'transcript', status: 'completed', progress: 100, size: 'TXT · 14 KB' },
-  { id: 5, title: '八字入门：认识十天干', owner: '山间命理课', mode: 'video', status: 'failed', progress: 17, size: '—' },
-])
+const tasks = ref([])
 const taskFilter = ref('全部')
 const taskFilters = ['全部', '进行中', '等待', '已完成', '失败']
 const filteredTasks = computed(() => {
-  const map = { 进行中: 'running', 等待: 'waiting', 已完成: 'completed', 失败: 'failed' }
-  return tasks.value.filter((task) => taskFilter.value === '全部' || task.status === map[taskFilter.value])
+  const map = { 进行中: ['running'], 等待: ['waiting'], 已完成: ['completed'], 失败: ['failed'] }
+  return tasks.value.filter((task) => taskFilter.value === '全部' || map[taskFilter.value]?.includes(task.status))
 })
 const runningTask = computed(() => tasks.value.find((task) => task.status === 'running'))
 const waitingTasks = computed(() => tasks.value.filter((task) => task.status === 'waiting'))
 const completedCount = computed(() => tasks.value.filter((task) => task.status === 'completed').length)
 const queueCount = computed(() => waitingTasks.value.length)
 
-function startNextTask() {
-  if (tasks.value.some((task) => task.status === 'running')) return
-  const next = tasks.value.find((task) => task.status === 'waiting')
-  if (next) { next.status = 'running'; next.progress = Math.max(3, next.progress) }
+function formatFileSize(bytes) {
+  const size = Number(bytes) || 0
+  if (size < 1) return '—'
+  if (size < 1024 ** 2) return `${(size / 1024).toFixed(1)} KB`
+  if (size < 1024 ** 3) return `${(size / 1024 ** 2).toFixed(1)} MB`
+  return `${(size / 1024 ** 3).toFixed(2)} GB`
 }
-function createTasks() {
-  const selected = allVideos.value.filter((video) => selectedVideoIds.value.has(video.id))
-  if (!selected.length) return
-  selected.forEach((video) => tasks.value.push({
-    id: nextTaskId++, title: video.title, owner: creator.name, mode: batchAction.value,
-    status: 'waiting', progress: 0, size: '—',
-  }))
-  clearAll()
-  startNextTask()
-  notify(`已加入 ${selected.length} 个${taskNames[batchAction.value]}任务`)
+
+async function refreshTasks() {
+  try {
+    const response = await fetch('/api/tasks')
+    if (!response.ok) throw new Error('任务列表读取失败')
+    const result = await response.json()
+    tasks.value = result.tasks || []
+    if (result.downloadDirectory && !settingsDirty.value) {
+      downloadPath.value = result.downloadDirectory
+      savedDownloadPath.value = result.downloadDirectory
+    }
+    return true
+  } catch {
+    return false
+  }
+}
+
+async function addSingleTask(mode = batchAction.value) {
+  if (!['video', 'audio'].includes(mode) || !singleVideo.value.bvid) return
+  try {
+    const response = await fetch('/api/tasks', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url: singleVideo.value.url || url.value, title: singleVideo.value.title, owner: singleVideo.value.owner, mode }),
+    })
+    const result = await response.json()
+    if (!response.ok) throw new Error(result.error?.message || '创建下载任务失败。')
+    await refreshTasks()
+    notify(`已加入${taskNames[mode]}队列`)
+  } catch (error) {
+    notify(error.message || '本地服务未连接，无法创建下载任务。')
+  }
   page.value = 'tasks'
 }
-function addSingleTask() {
-  const mode = batchAction.value || 'video'
-  tasks.value.push({ id: nextTaskId++, title: singleVideo.value.title, owner: singleVideo.value.owner, mode, status: 'waiting', progress: 0, size: '—' })
-  startNextTask()
-  notify(`已加入${taskNames[mode]}任务`)
-  page.value = 'tasks'
-}
-function cancelTask(task) {
-  if (!['running', 'waiting'].includes(task.status)) return
-  task.status = 'cancelled'
-  notify('当前任务已取消')
-  startNextTask()
+
+async function cancelTask(task) {
+  try {
+    const response = await fetch(`/api/tasks/${task.id}/cancel`, { method: 'POST' })
+    const result = await response.json()
+    if (!response.ok) throw new Error(result.error?.message || '取消任务失败。')
+    await refreshTasks()
+    notify('已请求取消，队列会继续执行')
+  } catch (error) { notify(error.message || '取消任务失败。') }
 }
 const confirmation = ref(null)
 const confirmationTitle = computed(() => confirmation.value?.type === 'clear-history' ? '清除任务历史？' : '取消当前任务？')
@@ -239,34 +252,40 @@ function confirmAction() {
   if (action.type === 'clear-history') clearHistory()
   else cancelTask(action.task)
 }
-function removeWaitingTask(task) {
+async function removeWaitingTask(task) {
   if (task.status !== 'waiting') return
-  tasks.value = tasks.value.filter((item) => item.id !== task.id)
-  notify('已从等待队列移除')
+  try {
+    const response = await fetch(`/api/tasks/${task.id}`, { method: 'DELETE' })
+    if (!response.ok) throw new Error('移除等待任务失败。')
+    await refreshTasks()
+    notify('已从等待队列移除')
+  } catch (error) { notify(error.message || '移除任务失败。') }
 }
-function retryTask(task) {
+async function retryTask(task) {
   if (task.status !== 'failed') return
-  task.status = 'waiting'
-  task.progress = 0
-  task.size = '—'
-  startNextTask()
-  notify('任务已重新加入队列')
+  try {
+    const response = await fetch(`/api/tasks/${task.id}/retry`, { method: 'POST' })
+    const result = await response.json()
+    if (!response.ok) throw new Error(result.error?.message || '重试任务失败。')
+    await refreshTasks()
+    notify('任务已重新加入队列')
+  } catch (error) { notify(error.message || '重试任务失败。') }
 }
-function clearHistory() {
-  const before = tasks.value.length
-  tasks.value = tasks.value.filter((task) => !['completed', 'failed', 'cancelled'].includes(task.status))
-  notify(before === tasks.value.length ? '暂无可清除的历史任务' : '已清除任务历史')
+async function clearHistory() {
+  try {
+    const response = await fetch('/api/tasks/history', { method: 'DELETE' })
+    if (!response.ok) throw new Error('清除任务历史失败。')
+    await refreshTasks()
+    notify('已清除任务历史')
+  } catch (error) { notify(error.message || '清除任务历史失败。') }
 }
-function advanceProgress() {
-  const task = runningTask.value
-  if (!task) return
-  task.progress = Math.min(task.progress + 1, 100)
-  if (task.progress >= 100) {
-    task.status = 'completed'
-    task.size = task.mode === 'transcript' ? 'TXT · 18 KB' : task.mode === 'audio' ? 'MP3 · 36 MB' : '286 MB'
-    if (task.mode === 'transcript') addTranscript(task)
-    startNextTask()
-  }
+
+async function openTaskLocation(task) {
+  try {
+    const response = await fetch(`/api/tasks/${task.id}/open`, { method: 'POST' })
+    const result = await response.json()
+    if (!response.ok) throw new Error(result.error?.message || '无法打开文件位置。')
+  } catch (error) { notify(error.message || '无法打开文件位置。') }
 }
 
 const transcriptText = `今天我们先从最基础的地方开始讲，拿到一个八字，不要着急去判断这个人好还是不好。我们先把四柱摆清楚，年柱、月柱、日柱、时柱，每一个位置都代表不同的信息。\n\n日柱的天干是日主，也就是我们接下来分析时的中心。其他的天干地支，都是围绕日主来看的。你先记住这个顺序：先认日主，再看月令，然后看整个命局里面五行之间怎么流通。\n\n这个地方我们先不要急着下结论。看到一个五行多，不代表它一定就是好，也不能直接说少的那个就一定不好。还是要回到原局，看它在什么位置，跟其他干支是什么关系。我们学习的时候一步一步来，先把每个字认清楚，再慢慢把它们连起来。\n\n比如说现在这个盘，日主是甲木，我们先看月令是不是对它有帮助，再看地支里面有没有根，天干上有没有同类帮扶。这里说的旺衰，是一个基础的观察方法，不是最后的答案。后面我们还要结合十神、组合关系和大运流年来看。\n\n再往下看月令，月令是我们观察季节气候的一个入口。甲木生在不同的月份，它周围的环境不一样，不能拿同一把尺子直接量。看到这里，大家可以先停一下，把月支圈出来，想一想这个季节里面木的状态是什么。先说你看见了什么，再说它对日主有什么影响。\n\n地支里面还有藏干，所以一个地支不能只看表面那个字。我们把藏干写出来以后，再看这些字跟日主之间是什么关系。这个时候十神的概念就可以慢慢用起来了。刚开始记不住没有关系，我们先用表格查，重复几次以后，自然就熟悉了。\n\n大家容易遇到的一个问题，就是只盯着某一个字看。比如说看到一个冲，就马上觉得一定发生什么事情；看到一个合，就马上觉得它们都合住了。实际分析的时候，要把位置、力量和其他关系一起摆出来。现在先不用记复杂判断，我们先把每一步看完整。\n\n做案例的时候，先不要看答案。你按顺序把四柱写出来，标好阴阳和五行，再找日主和月令，最后把天干地支之间的关系连起来。把你看到的写在纸上，然后对照讲解，看看自己在哪一步漏了。这样练，比一上来背结论更有用。\n\n大家做练习的时候，可以先把四柱写出来，在旁边标上每个字的五行和阴阳。刚开始慢一点没有关系，把基础的步骤做对，后面分析才不会乱。今天这节课先到这里，下一节我们接着讲十天干的特点。`
@@ -323,7 +342,7 @@ const showApiKey = ref(false)
 const savedApiKey = ref('')
 const apiTesting = ref(false)
 const apiTested = ref(false)
-const downloadPath = ref('D:\\BiliScribe\\视频')
+const downloadPath = ref('')
 const transcriptPath = ref('D:\\BiliScribe\\文字稿')
 const savedDownloadPath = ref(downloadPath.value)
 const savedTranscriptPath = ref(transcriptPath.value)
@@ -335,11 +354,20 @@ const logPath = ref('项目目录/logs/biliscribe.log')
 const logAvailable = ref(false)
 const logLineCount = ref(0)
 const logLoading = ref(false)
-function saveSettings() {
-  savedApiKey.value = apiKey.value
-  savedDownloadPath.value = downloadPath.value
-  savedTranscriptPath.value = transcriptPath.value
-  notify('设置已保存到当前演示会话')
+async function saveSettings() {
+  try {
+    const response = await fetch('/api/settings/download', {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ downloadDirectory: downloadPath.value }),
+    })
+    const result = await response.json()
+    if (!response.ok) throw new Error(result.error?.message || '下载目录保存失败。')
+    downloadPath.value = result.downloadDirectory
+    savedDownloadPath.value = result.downloadDirectory
+    savedApiKey.value = apiKey.value
+    savedTranscriptPath.value = transcriptPath.value
+    notify('下载目录已保存到本机，后续任务将使用此位置')
+  } catch (error) { notify(error.message || '保存下载目录失败。') }
 }
 
 async function refreshLoginStatus() {
@@ -450,12 +478,6 @@ function testApi() {
   apiTested.value = false
   setTimeout(() => { apiTesting.value = false; apiTested.value = true; notify('连接测试成功（演示）') }, 850)
 }
-function choosePath(which) {
-  if (which === 'video') downloadPath.value = 'D:\\BiliScribe\\视频'
-  else transcriptPath.value = 'D:\\BiliScribe\\文字稿'
-  notify('目录选择为演示交互，未访问本机文件')
-}
-
 async function refreshLogPreview() {
   logLoading.value = true
   try {
@@ -534,8 +556,8 @@ async function openLogDirectory() {
   }
 }
 
-onMounted(() => { progressTimer = setInterval(advanceProgress, 900); refreshBackendStatus(); refreshLoginStatus() })
-onUnmounted(() => { clearInterval(progressTimer); clearInterval(qrPollTimer); clearTimeout(qrSuccessCloseTimer); clearTimeout(toastTimer) })
+onMounted(() => { refreshBackendStatus(); refreshLoginStatus(); refreshTasks(); taskPollTimer = setInterval(refreshTasks, 1200) })
+onUnmounted(() => { clearInterval(taskPollTimer); clearInterval(qrPollTimer); clearTimeout(qrSuccessCloseTimer); clearTimeout(toastTimer) })
 </script>
 
 <template>
@@ -560,8 +582,7 @@ onUnmounted(() => { clearInterval(progressTimer); clearInterval(qrPollTimer); cl
       <div class="sidebar-queue-card">
         <div class="queue-card-top"><span class="live-dot"></span><span>任务队列</span><span class="queue-count">{{ queueCount + (runningTask ? 1 : 0) }}</span></div>
         <div class="queue-card-title">{{ runningTask ? '正在处理任务' : '队列空闲' }}</div>
-        <div class="queue-card-meta"><span>{{ runningTask ? taskNames[runningTask.mode] : '等待添加任务' }}</span><span v-if="runningTask">{{ runningTask.progress }}%</span></div>
-        <div v-if="runningTask" class="mini-progress"><span :style="{ width: `${runningTask.progress}%` }"></span></div>
+        <div class="queue-card-meta"><span>{{ runningTask ? (runningTask.phase || taskNames[runningTask.mode]) : '等待添加任务' }}</span><span v-if="runningTask">{{ taskNames[runningTask.mode] }}</span></div>
       </div>
       <div class="sidebar-footer"><span class="avatar">B</span><div><strong>本机工作区</strong><span>本地 UI 原型</span></div><button class="icon-button"><MoreHorizontal :size="18" /></button></div>
     </aside>
@@ -620,22 +641,22 @@ onUnmounted(() => { clearInterval(progressTimer); clearInterval(qrPollTimer); cl
 
           <div v-else class="single-result panel">
             <div class="section-heading"><div><div class="eyebrow">解析结果</div><h2>单个视频</h2></div><span class="result-chip"><Check :size="14" />已识别</span></div>
-            <div class="single-video-card"><div class="single-cover thumb-art" :class="singleVideo.cover ? 'has-real-cover' : 'cover-unavailable'"><img v-if="singleVideo.cover" class="real-cover" :src="singleVideo.cover" alt="视频封面" /><span v-else class="cover-placeholder">封面暂不可用</span><span class="thumb-duration">{{ singleVideo.duration }}</span></div><div class="single-video-info"><span class="video-eyebrow"><Radio :size="13" />真实解析结果</span><h3>{{ singleVideo.title }}</h3><div class="single-meta"><span><UserRound :size="14" />{{ singleVideo.owner }}</span><span v-if="singleVideo.bvid">{{ singleVideo.bvid }}</span><span v-if="singleVideo.date">{{ singleVideo.date }}</span><span v-if="singleVideo.views !== null">{{ Number(singleVideo.views).toLocaleString('zh-CN') }} 播放</span></div><div class="single-divider"></div><div class="mode-label">选择处理方式</div><div class="mode-options"><button v-for="mode in modeOptions" :key="mode.id" class="mode-option" :class="{ active: batchAction === mode.id }" @click="batchAction = mode.id"><component :is="mode.icon" :size="17" /><span>{{ mode.label }}</span><span class="mode-radio"><i></i></span></button></div><button class="primary-button single-action" @click="batchAction = batchAction || 'video'; addSingleTask()"><Plus :size="16" />创建任务</button></div></div>
+            <div class="single-video-card"><div class="single-cover thumb-art" :class="singleVideo.cover ? 'has-real-cover' : 'cover-unavailable'"><img v-if="singleVideo.cover" class="real-cover" :src="singleVideo.cover" alt="视频封面" /><span v-else class="cover-placeholder">封面暂不可用</span><span class="thumb-duration">{{ singleVideo.duration }}</span></div><div class="single-video-info"><span class="video-eyebrow"><Radio :size="13" />真实解析结果</span><h3>{{ singleVideo.title }}</h3><div class="single-meta"><span><UserRound :size="14" />{{ singleVideo.owner }}</span><span v-if="singleVideo.bvid">{{ singleVideo.bvid }}</span><span v-if="singleVideo.date">{{ singleVideo.date }}</span><span v-if="singleVideo.views !== null">{{ Number(singleVideo.views).toLocaleString('zh-CN') }} 播放</span></div><div class="single-divider"></div><div class="mode-label">选择处理方式</div><div class="mode-options"><button v-for="mode in modeOptions" :key="mode.id" class="mode-option" :class="{ active: batchAction === mode.id }" @click="batchAction = mode.id"><component :is="mode.icon" :size="17" /><span>{{ mode.label }}</span><span class="mode-radio"><i></i></span></button></div><button class="primary-button single-action" @click="addSingleTask(batchAction)"><Plus :size="16" />创建任务</button></div></div>
           </div>
         </section>
 
         <section v-else-if="page === 'tasks'" class="page-content tasks-page">
-          <div class="page-heading"><div><div class="eyebrow">TASK CENTER</div><h1>任务</h1><p>下载与转写按单队列串行执行，一次只处理一个任务。</p></div><button class="outline-button" @click="requestClearHistory"><Trash2 :size="15" />清除历史</button></div>
+          <div class="page-heading"><div><div class="eyebrow">TASK CENTER</div><h1>任务</h1><p>视频与音频下载按加入顺序串行执行，一次只处理一个任务。</p></div><button class="outline-button" :disabled="!tasks.some((task) => ['completed', 'failed', 'cancelled'].includes(task.status))" @click="requestClearHistory"><Trash2 :size="15" />清除历史</button></div>
           <div class="task-overview"><div class="overview-card active-overview"><div class="overview-icon"><Activity :size="18" /></div><div><span>当前执行</span><strong>{{ runningTask ? '1' : '0' }}<small> 个任务</small></strong></div><span class="overview-live"><i></i>单任务</span></div><div class="overview-card"><div class="overview-icon queue"><Clock3 :size="18" /></div><div><span>等待队列</span><strong>{{ queueCount }}<small> 个任务</small></strong></div></div><div class="overview-card"><div class="overview-icon done"><Check :size="18" /></div><div><span>已完成</span><strong>{{ completedCount }}<small> 个任务</small></strong></div></div><div class="serial-note"><LockKeyhole :size="16" /><span>串行处理</span><small>当前任务完成后自动开始下一项</small></div></div>
           <div class="task-section panel"><div class="task-toolbar"><div class="filter-tabs"><button v-for="filter in taskFilters" :key="filter" :class="{ active: taskFilter === filter }" @click="taskFilter = filter">{{ filter }}<span v-if="filter === '等待' && queueCount">{{ queueCount }}</span></button></div></div>
             <div v-if="!filteredTasks.length" class="empty-state task-empty"><div class="empty-state-icon"><ListChecks :size="19" /></div><strong>{{ tasks.length ? '没有符合条件的任务' : '还没有任务' }}</strong><span>{{ tasks.length ? '切换筛选条件查看其他任务。' : '创建一个新任务后，它会显示在这里。' }}</span></div>
             <template v-else>
-              <div v-if="taskFilter === '全部' || taskFilter === '进行中'" class="task-group current-task-group"><div class="task-group-heading"><div><span class="group-dot running"></span><strong>正在执行</strong><span class="group-hint">当前唯一任务</span></div><span class="group-count">{{ runningTask ? '01' : '00' }}</span></div><div v-if="runningTask" class="task-row running-row"><div class="task-type-icon" :class="runningTask.mode"><component :is="taskIcon[runningTask.mode]" :size="18" /></div><div class="task-main"><div class="task-title-row"><strong>{{ runningTask.title }}</strong><span class="task-status running"><LoaderCircle class="spin" :size="12" />正在{{ taskNames[runningTask.mode] }}</span></div><div class="task-subtitle">{{ runningTask.owner }} <i>·</i> {{ taskNames[runningTask.mode] }}<template v-if="runningTask.mode === 'transcript'"><i>·</i> MiMo V2.6 Flash</template></div><div class="task-progress-line"><div class="progress-track"><span :style="{ width: `${runningTask.progress}%` }"></span></div><span>{{ runningTask.progress }}%</span><small>{{ runningTask.size }}</small></div></div><button class="cancel-button" @click="requestCancelRunning(runningTask)"><X :size="14" />取消</button></div><div v-else class="empty-inline"><CheckCheck :size="18" />当前没有正在执行的任务</div></div>
+              <div v-if="taskFilter === '全部' || taskFilter === '进行中'" class="task-group current-task-group"><div class="task-group-heading"><div><span class="group-dot running"></span><strong>正在执行</strong><span class="group-hint">当前唯一任务</span></div><span class="group-count">{{ runningTask ? '01' : '00' }}</span></div><div v-if="runningTask" class="task-row running-row"><div class="task-type-icon" :class="runningTask.mode"><component :is="taskIcon[runningTask.mode]" :size="18" /></div><div class="task-main"><div class="task-title-row"><strong>{{ runningTask.title }}</strong><span class="task-status running"><LoaderCircle class="spin" :size="12" />{{ runningTask.phase || '准备中' }}</span></div><div class="task-subtitle">{{ runningTask.owner }} <i>·</i> {{ taskNames[runningTask.mode] }}</div><div class="task-progress-line"><span class="phase-indicator"></span><span>{{ runningTask.phase || '准备中' }}</span></div></div><button class="cancel-button" :disabled="runningTask.phase === '正在取消'" @click="requestCancelRunning(runningTask)"><X :size="14" />{{ runningTask.phase === '正在取消' ? '正在取消' : '取消' }}</button></div><div v-else class="empty-inline"><CheckCheck :size="18" />当前没有正在执行的任务</div></div>
               <div v-if="taskFilter === '全部' || taskFilter === '等待'" class="task-group"><div class="task-group-heading"><div><span class="group-dot waiting"></span><strong>等待队列</strong><span class="group-hint">按加入顺序执行</span></div><span class="group-count">{{ String(waitingTasks.length).padStart(2, '0') }}</span></div><div v-if="waitingTasks.length" class="waiting-list"><div v-for="(task, index) in waitingTasks" :key="task.id" class="task-row waiting-row"><div class="queue-index">{{ String(index + 1).padStart(2, '0') }}</div><div class="task-type-icon" :class="task.mode"><component :is="taskIcon[task.mode]" :size="18" /></div><div class="task-main"><div class="task-title-row"><strong>{{ task.title }}</strong><span class="task-status waiting"><Clock3 :size="12" />等待中</span></div><div class="task-subtitle">{{ task.owner }} <i>·</i> {{ taskNames[task.mode] }} <i>·</i> 加入队列</div></div><button class="remove-button" @click="removeWaitingTask(task)"><Trash2 :size="14" />移除</button></div></div><div v-else class="empty-inline"><Clock3 :size="18" />队列中没有等待任务</div></div>
-              <div v-if="taskFilter !== '进行中' && taskFilter !== '等待'" class="task-group history-group"><div class="task-group-heading"><div><span class="group-dot history"></span><strong>任务记录</strong><span class="group-hint">已完成、失败与取消</span></div><span class="group-count">{{ String(filteredTasks.filter((task) => ['completed', 'failed', 'cancelled'].includes(task.status)).length).padStart(2, '0') }}</span></div><div v-if="filteredTasks.some((task) => ['completed', 'failed', 'cancelled'].includes(task.status))" class="history-list"><div v-for="task in filteredTasks.filter((item) => ['completed', 'failed', 'cancelled'].includes(item.status))" :key="task.id" class="task-row history-row"><div class="task-type-icon" :class="task.mode"><component :is="taskIcon[task.mode]" :size="18" /></div><div class="task-main"><div class="task-title-row"><strong>{{ task.title }}</strong><span class="task-status" :class="task.status"><Check v-if="task.status === 'completed'" :size="12" /><XCircle v-else :size="12" />{{ task.status === 'completed' ? '已完成' : task.status === 'failed' ? '失败' : '已取消' }}</span></div><div class="task-subtitle">{{ task.owner }} <i>·</i> {{ taskNames[task.mode] }} <i>·</i> {{ task.size }}</div></div><button v-if="task.status === 'failed'" class="retry-button" @click="retryTask(task)"><RefreshCw :size="14" />重试</button></div></div><div v-else class="empty-inline"><History :size="18" />暂无符合条件的历史记录</div></div>
+              <div v-if="taskFilter !== '进行中' && taskFilter !== '等待'" class="task-group history-group"><div class="task-group-heading"><div><span class="group-dot history"></span><strong>任务记录</strong><span class="group-hint">已完成、失败与取消</span></div><span class="group-count">{{ String(filteredTasks.filter((task) => ['completed', 'failed', 'cancelled'].includes(task.status)).length).padStart(2, '0') }}</span></div><div v-if="filteredTasks.some((task) => ['completed', 'failed', 'cancelled'].includes(task.status))" class="history-list"><div v-for="task in filteredTasks.filter((item) => ['completed', 'failed', 'cancelled'].includes(item.status))" :key="task.id" class="task-row history-row"><div class="task-type-icon" :class="task.mode"><component :is="taskIcon[task.mode]" :size="18" /></div><div class="task-main"><div class="task-title-row"><strong>{{ task.title }}</strong><span class="task-status" :class="task.status"><Check v-if="task.status === 'completed'" :size="12" /><XCircle v-else :size="12" />{{ task.status === 'completed' ? '已完成' : task.status === 'failed' ? '失败' : '已取消' }}</span></div><div class="task-subtitle">{{ task.owner }} <i>·</i> {{ taskNames[task.mode] }} <i>·</i> {{ task.status === 'completed' ? formatFileSize(task.fileSize) : task.error || task.phase }}</div><div v-if="task.outputPath && task.status === 'completed'" class="task-output-path" :title="task.outputPath">{{ task.outputPath }}</div></div><button v-if="task.status === 'completed'" class="outline-button task-open-button" @click="openTaskLocation(task)"><FolderOpen :size="14" />打开位置</button><button v-if="task.status === 'failed'" class="retry-button" @click="retryTask(task)"><RefreshCw :size="14" />重试</button></div></div><div v-else class="empty-inline"><History :size="18" />暂无符合条件的历史记录</div></div>
             </template>
           </div>
-          <div class="task-footnote"><Zap :size="14" /><span>为避免占用过多系统资源，第一版只允许一个下载或转写任务运行；取消当前任务后将自动继续队列。</span></div>
+          <div class="task-footnote"><Zap :size="14" /><span>一次只运行一个 BBDownNext 下载进程；取消当前任务后会自动继续队列，未确认归属的临时文件不会自动删除。</span></div>
         </section>
 
         <section v-else-if="page === 'transcripts'" class="page-content transcripts-page">
@@ -650,7 +671,7 @@ onUnmounted(() => { clearInterval(progressTimer); clearInterval(qrPollTimer); cl
           <div class="settings-layout"><aside class="settings-nav panel"><span class="settings-nav-label">偏好设置</span><a class="settings-nav-item active"><UserRound :size="16" />账号与服务</a><a class="settings-nav-item"><FolderOpen :size="16" />文件与目录</a><a class="settings-nav-item"><SlidersIcon />任务处理</a><div class="settings-nav-divider"></div><div class="settings-nav-help"><CircleHelp :size="16" /><span>遇到问题？<small>查看使用说明</small></span><ExternalLink :size="13" /></div></aside><div class="settings-content">
             <section class="settings-card panel"><div class="settings-card-heading"><div class="settings-heading-icon bilibili-icon">哔</div><div><h2>B 站账号</h2><p>登录后可访问需要登录的视频内容</p></div><span class="settings-status" :class="loginState ? 'ok' : 'off'"><i></i>{{ loginLoading ? '检查中' : loginState ? '已登录' : '未登录' }}</span></div><div class="setting-divider"></div><div class="account-row"><div class="account-avatar"><img v-if="loginAccount?.avatar" :src="loginAccount.avatar" alt="" />{{ loginAccount?.avatar ? '' : loginState ? (loginAccount?.name?.slice(0, 1) || 'B') : 'B' }}<span :class="{ online: loginState }"></span></div><div class="account-info"><strong>{{ loginAccount?.name || (loginState ? 'B 站账号' : '尚未登录 B 站') }}</strong><span>{{ loginAccount?.uid ? `UID：${loginAccount.uid}` : loginState ? '已使用本机保存的登录状态' : '扫码登录以使用完整解析能力' }}</span></div><button class="outline-button account-button" @click="openQrDialog"><ScanLine :size="15" />{{ loginState ? '重新登录' : '扫码登录' }}</button><button v-if="loginState" class="outline-button account-button logout-account-button" @click="logoutConfirm = true"><LogOut :size="15" />退出登录</button></div><div class="settings-tip"><ShieldCheck :size="15" /><span>登录凭据仅保存在本机，并由 BBDownNext 管理；公开视频仍可在未登录时解析。</span></div></section>
             <section class="settings-card panel"><div class="settings-card-heading"><div class="settings-heading-icon model-icon"><Sparkles :size="18" /></div><div><h2>文字稿模型</h2><p>用于将视频音频转换为课程文字稿</p></div><span class="fixed-tag"><LockKeyhole :size="12" />固定模型</span></div><div class="model-field"><label>模型</label><div class="model-select"><span class="model-dot"></span><strong>MiMo V2.6 Flash</strong><span class="model-subtle">快速 · 低成本</span><ChevronDown :size="16" /></div><small>转写结果忠实保留原话，不总结、不重写。</small></div><div class="api-key-field"><div class="api-label"><label for="api-key">MiMo API Key</label><a href="#" @click.prevent="notify('API Key 申请链接为演示内容')">如何获取？<ExternalLink :size="12" /></a></div><div class="api-input-row"><div class="key-input"><KeyRound :size="16" /><input id="api-key" v-model="apiKey" :type="showApiKey ? 'text' : 'password'" autocomplete="off" placeholder="输入你的 API Key" @input="apiTested = false" /><button type="button" class="key-visibility" :aria-label="showApiKey ? '隐藏 API Key' : '显示 API Key'" @click="showApiKey = !showApiKey"><component :is="showApiKey ? EyeOff : Eye" :size="15" /></button></div><button class="outline-button test-api-button" :disabled="apiTesting" @click="testApi"><LoaderCircle v-if="apiTesting" class="spin" :size="15" /><Activity v-else :size="15" />{{ apiTesting ? '测试中' : '测试连接' }}</button></div><div class="api-feedback"><span v-if="apiTested" class="success-text"><Check :size="13" />连接成功（演示）</span><span v-else-if="!apiKey.trim()"><LockKeyhole :size="12" />尚未配置 API Key</span><span v-else-if="settingsDirty"><CircleHelp :size="13" />有未保存的更改</span><span v-else><Check :size="13" />已保存到当前演示会话</span></div><div v-if="!apiKey.trim()" class="empty-state api-empty-state"><div class="empty-state-icon"><KeyRound :size="16" /></div><strong>API 尚未配置</strong><span>填写并保存 API Key 后，才可测试连接。</span></div></div></section>
-            <section class="settings-card panel"><div class="settings-card-heading"><div class="settings-heading-icon folder-icon"><FolderOpen :size="18" /></div><div><h2>文件与目录</h2><p>设置下载文件和文字稿的保存位置</p></div></div><div class="setting-divider"></div><div class="path-setting"><div><label>视频与音频目录</label><span>下载完成的媒体文件保存位置</span></div><div class="path-control"><input v-model="downloadPath" aria-label="视频与音频目录" /><button class="outline-button path-button" @click="choosePath('video')"><FolderOpen :size="15" />选择</button></div></div><div class="path-setting"><div><label>文字稿目录</label><span>转写完成后导出的 TXT 文件位置</span></div><div class="path-control"><input v-model="transcriptPath" aria-label="文字稿目录" /><button class="outline-button path-button" @click="choosePath('transcript')"><FolderOpen :size="15" />选择</button></div></div><div class="settings-tip folder-tip"><HardDriveDownload :size="15" /><span>原型中显示的是示例路径，不会读写本机文件。</span></div></section>
+            <section class="settings-card panel"><div class="settings-card-heading"><div class="settings-heading-icon folder-icon"><FolderOpen :size="18" /></div><div><h2>文件与目录</h2><p>设置下载文件和文字稿的保存位置</p></div></div><div class="setting-divider"></div><div class="path-setting"><div><label>视频与音频目录</label><span>下载完成的媒体文件保存位置</span></div><div class="path-control"><input v-model="downloadPath" aria-label="视频与音频目录" /></div></div><div class="path-setting"><div><label>文字稿目录</label><span>转写完成后导出的 TXT 文件位置</span></div><div class="path-control"><input v-model="transcriptPath" aria-label="文字稿目录" /></div></div><div class="settings-tip folder-tip"><HardDriveDownload :size="15" /><span>保存后立即用于新下载任务；目录不存在时会自动创建。文字稿目录暂未接入。</span></div></section>
             <section class="settings-card compact-settings panel"><div class="settings-card-heading"><div class="settings-heading-icon queue-icon"><ListChecks :size="18" /></div><div><h2>任务队列</h2><p>下载与转写任务使用同一个串行队列</p></div></div><div class="queue-setting-line"><span>同时执行的任务</span><span class="serial-value"><span class="live-dot"></span>1 个任务 <span class="locked-mini"><LockKeyhole :size="11" />第一版固定</span></span></div></section>
           <section class="settings-card debug-logs-card panel"><div class="settings-card-heading"><div class="settings-heading-icon logs-icon"><History :size="18" /></div><div><h2>调试与日志</h2><p>排查问题时可复制近期记录，或导出完整日志</p></div><span class="settings-status" :class="backendStatus === 'online' ? 'ok' : 'off'"><i></i>{{ backendStatus === 'online' ? '后台已连接' : '后台未运行' }}</span></div><div class="setting-divider"></div><div class="logs-location"><span>日志路径</span><code>{{ logPath }}</code></div><div class="logs-state"><span class="logs-state-dot" :class="backendStatus === 'online' && logAvailable ? 'ready' : ''"></span><span>{{ backendStatus !== 'online' ? '打开 BiliScribe 后即可查看日志。' : !logAvailable ? '日志文件目前为空，产生记录后即可使用日志工具。' : `日志已就绪 · 当前文件 ${logLineCount} 行` }}</span><small v-if="backendStatus === 'online'">{{ bbdownAvailable ? `BBDownNext v${bbdownVersion || '版本未知'} 已就绪` : '未找到 BBDownNext 可执行文件' }}</small></div><div class="logs-actions"><button class="outline-button" :disabled="backendStatus !== 'online' || !logAvailable || logLoading" @click="copyRecentLogs"><Copy :size="15" />复制最新日志</button><button class="outline-button" :disabled="backendStatus !== 'online' || !logAvailable" @click="exportLogs"><Download :size="15" />导出日志</button><button class="outline-button" :disabled="backendStatus !== 'online'" @click="openLogDirectory"><FolderOpen :size="15" />打开日志目录</button></div><p class="logs-note">日志保留最近约 300 行供复制；完整日志会自动轮换。日志中不会写入 API Key、B 站 Cookie 或访问令牌。</p></section>
           </div></div>
@@ -658,7 +679,7 @@ onUnmounted(() => { clearInterval(progressTimer); clearInterval(qrPollTimer); cl
       </div>
     </main>
 
-    <div v-if="page === 'new' && parseState === 'success' && resultType === 'creator' && selectedCount" class="batch-bar"><div class="batch-selection"><div class="batch-selected-icon"><Check :size="16" /></div><div><strong>已选择 {{ selectedCount }} 个视频</strong><small v-if="creatorSearch.trim()">包含当前筛选外的选择</small><button @click="clearAll">清空选择</button></div></div><span class="batch-divider"></span><div class="batch-action-select"><span>添加为</span><button v-for="mode in modeOptions" :key="mode.id" :class="{ active: batchAction === mode.id }" @click="batchAction = mode.id"><component :is="mode.icon" :size="15" />{{ mode.label }}<span class="radio-dot"><i></i></span></button></div><button class="primary-button batch-create" @click="createTasks"><Plus :size="16" />创建 {{ selectedCount }} 个任务</button></div>
+    <div v-if="page === 'new' && parseState === 'success' && resultType === 'creator' && selectedCount" class="batch-bar"><div class="batch-selection"><div class="batch-selected-icon"><Check :size="16" /></div><div><strong>已选择 {{ selectedCount }} 个视频</strong><small v-if="creatorSearch.trim()">包含当前筛选外的选择</small><button @click="clearAll">清空选择</button></div></div><span class="batch-divider"></span><div class="batch-action-select"><span>添加为</span><button v-for="mode in modeOptions" :key="mode.id" :class="{ active: batchAction === mode.id }" @click="batchAction = mode.id"><component :is="mode.icon" :size="15" />{{ mode.label }}<span class="radio-dot"><i></i></span></button></div><button class="primary-button batch-create" disabled title="UP 主批量下载暂未接入"><Plus :size="16" />UP 主批量下载暂未接入</button></div>
 
     <div v-if="confirmationDialog" class="modal-backdrop" @click.self="confirmation = null"><div class="confirm-modal panel" role="dialog" aria-modal="true" :aria-label="confirmationTitle"><button class="icon-button modal-close" aria-label="关闭" @click="confirmation = null"><X :size="18" /></button><div class="confirm-modal-icon"><CircleHelp :size="20" /></div><h2>{{ confirmationTitle }}</h2><p>{{ confirmationMessage }}</p><div class="confirm-actions"><button class="outline-button" @click="confirmation = null">返回</button><button class="primary-button confirm-danger" @click="confirmAction">{{ confirmation?.type === 'clear-history' ? '清除历史' : '确认取消' }}</button></div></div></div>
     <div v-if="qrDialog" class="modal-backdrop" @click.self="closeQrDialog"><div class="login-modal panel" role="dialog" aria-modal="true" aria-label="扫码登录 B 站"><button class="icon-button modal-close" aria-label="关闭" @click="closeQrDialog"><X :size="18" /></button><div class="login-modal-icon"><ScanLine :size="22" /></div><h2>扫码登录 B 站</h2><p>打开哔哩哔哩 App，扫描二维码完成登录</p><div class="real-qr" :class="{ 'qr-is-loading': qrStarting }"><img v-if="qrImage" :src="qrImage" alt="B 站登录二维码" /><div v-else class="qr-placeholder"><LoaderCircle v-if="qrStarting" class="spin" :size="24" /><ScanLine v-else :size="24" /></div></div><div class="qr-note" :class="`qr-${qrStatus}`"><span class="live-dot"></span>{{ qrStatusLabel }}</div><p v-if="qrMessage" class="qr-error-message">{{ qrMessage }}</p><button v-if="['expired', 'failed'].includes(qrStatus)" class="primary-button simulate-login" :disabled="qrStarting" @click="startQrLogin"><RefreshCw :size="16" />刷新二维码</button><small class="modal-disclaimer">登录信息仅保存在本机，不会发送给 BiliScribe 服务之外的站点。</small></div></div>
