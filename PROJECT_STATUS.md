@@ -14,10 +14,12 @@
 - 本地音频支持 mp3、m4a、wav、flac、ogg；文件夹只扫描当前层级，标题可编辑，TXT 保存到“本地导入/课程名”或“本地导入/未分组”。本机路径只保存在后台状态中，任务 API 返回时会隐藏路径。
 - MiMo 遇到 `repetition_truncation` 或 `length` 时只自适应拆分当前失败片段；整段请求仍优先，成功片段立即写入 checkpoint 并在重试时复用。动态拆分最小子段为 8 分钟，重复截断达到下限时显示明确的音频质量错误。
 - 重复截断诊断日志只记录任务 ID、片段时长/层级、生成字符数、finish reason 和子段时长，不记录正文；纯数字用量字段使用 `completionTokenCount`。
+- UP 主主页合集展开显示合集内全部子视频；搜索时仅显示合集内匹配项，合集勾选继续作用于当前匹配的视频。
 
 ## 当前验证
 
 - 本次 `npm run build`、`node --check server/api.js`、`node --test server/transcript-adaptive.test.js`（4 项模拟）和 `git diff --check` 通过。
+- 合集分页修复后 `npm run build` 和 `git diff --check` 通过。
 - production 服务由 `npm run start` 启动，健康接口与 `/api/tasks` 返回 200；浏览器中已验证来源切换和本地音频页面。
 - 原生选择器子进程已启动；当前 UI 控制工具无法操作 Windows 原生窗口，因此未完成实际多选、文件夹扫描和不支持格式的交互验收。
 - 未创建转写任务，未调用 MiMo，未运行长课程测试；BiliScribe.vbs 启动命令被本机执行策略拦截，未能验证本次构建的 VBS 启动。

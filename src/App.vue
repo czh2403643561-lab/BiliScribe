@@ -62,8 +62,8 @@ const currentAlbums = computed(() => {
   const pageIds = new Set(pageVideos.value.map((video) => video.id))
   const query = creatorSearch.value.trim().toLowerCase()
   return creatorGroups.value.map((group) => {
-    const selectionVideos = query ? group.videos.filter((video) => video.title.toLowerCase().includes(query)) : group.videos
-    return { ...group, selectionVideos, pageVideos: group.videos.filter((video) => pageIds.has(video.id)) }
+    const visibleVideos = query ? group.videos.filter((video) => video.title.toLowerCase().includes(query)) : group.videos
+    return { ...group, selectionVideos: visibleVideos, visibleVideos, pageVideos: group.videos.filter((video) => pageIds.has(video.id)) }
   }).filter((group) => group.pageVideos.length)
 })
 const pageNumbers = computed(() => {
@@ -843,7 +843,7 @@ onUnmounted(() => { clearInterval(taskPollTimer); clearInterval(qrPollTimer); cl
                     <button class="album-expand" @click="toggleAlbum(album)"><span>{{ expandedAlbums.has(album.id) ? '收起' : '展开' }}</span><ChevronDown :size="16" :class="{ rotated: expandedAlbums.has(album.id) }" /></button>
                   </div>
                   <div v-if="expandedAlbums.has(album.id)" class="video-list">
-                    <div v-for="video in album.pageVideos" :key="`${album.id}-${video.id}`" class="video-row" :class="{ selected: selectedVideoIds.has(video.id) }">
+                    <div v-for="video in album.visibleVideos" :key="`${album.id}-${video.id}`" class="video-row" :class="{ selected: selectedVideoIds.has(video.id) }">
                       <label class="check-label video-checkbox"><input type="checkbox" :checked="selectedVideoIds.has(video.id)" @change="toggleVideo(video.id)" /><span class="custom-check"><Check :size="12" /></span></label>
                       <div class="video-thumb thumb-art"><span class="art-orbit"></span><span class="art-copy"><small>{{ video.bvid }}</small><b>{{ video.title }}</b></span><img v-if="video.cover" class="thumb-real-image" :src="video.cover" alt="" @load="$event.target.parentElement.classList.add('image-loaded')" @error="$event.target.style.display = 'none'" /><span class="thumb-duration">{{ video.duration }}</span></div>
                       <div class="video-details"><strong>{{ video.title }}</strong><div class="video-meta"><span><UserRound :size="12" />{{ video.owner }}</span><span><CirclePlay :size="12" />{{ formatViews(video.views) }} 播放</span><span>{{ video.date }}</span></div></div>
