@@ -1583,6 +1583,20 @@ async function splitTranscriptSegment(task, ffmpegPath, workDirectory, segment) 
   return children
 }
 
+function buildTranscriptPrompt(task, basePrompt) {
+  const clean = (value) => String(value || '').replace(/[\r\n\t]+/g, ' ').trim()
+  const title = clean(task.title)
+  const collectionName = clean(task.groupName)
+  const owner = clean(task.creatorName || task.owner)
+  const lines = ['课程上下文：']
+  if (title && title !== task.bvid) lines.push(`标题：${title}`)
+  if (collectionName && collectionName !== '其他视频') lines.push(`合集：${collectionName}`)
+  if (owner && owner !== '未知 UP 主' && !/^UP 主（UID：\d+）$/.test(owner)) lines.push(`UP主：${owner}`)
+  if (lines.length === 1) return basePrompt
+  lines.push('', '说明：', '这些信息仅用于辅助判断书名、人名、术语和课程主题。', '必须以实际音频内容为准。', '不得根据标题、合集名或 UP 主信息补充音频中没有出现的内容。')
+  return `${lines.join('\n')}\n\n${basePrompt}`
+}
+
 async function runTranscriptTask(task) {
   let startedAt
   const ownedWorkDirectory = path.join(transcriptWorkDirectory, task.id)
@@ -1630,7 +1644,8 @@ async function runTranscriptTask(task) {
     }
     if (task.cancelRequested) throw transcriptFailure('transcript_cancelled', '任务已取消。')
 
-    const prompt = await fs.promises.readFile(transcriptPromptFile, 'utf8')
+    const basePrompt = await fs.promises.readFile(transcriptPromptFile, 'utf8')
+    const prompt = buildTranscriptPrompt(task, basePrompt)
     const sourceAudioHash = await hashFile(sourceAudio)
     const promptHash = createHash('sha256').update(prompt).digest('hex')
     const existingCheckpoint = readTranscriptCheckpoint(ownedWorkDirectory, task.id)
@@ -1880,7 +1895,7 @@ async function createDownloadTask(request, response) {
     id: randomUUID(), bvid, url: canonicalUrl,
     title: String(body.title || bvid).slice(0, 300),
     owner: String(body.owner || '未知 UP 主').slice(0, 120),
-    creatorName: '', groupName: '',
+    creatorName: '', groupName: String(body.groupName || '').slice(0, 120),
     mode: body.mode, status: 'waiting', phase: '等待中', progress: null,
     outputPath: '', outputDirectory: '', outputFiles: [], fileSize: 0,
     error: '', createdAt: new Date().toISOString(), completedAt: null,
@@ -2214,6 +2229,7 @@ async function parseSingleVideo(request, response) {
       bvid,
       title: details?.title || cliMetadata.title || cliMetadata.partTitle,
       owner: details?.owner?.name || (cliMetadata.ownerId ? `UP 主（UID：${cliMetadata.ownerId}）` : '未知 UP 主'),
+      collectionName: String(details?.ugc_season?.title || ''),
       duration: durationSeconds ? formatDuration(durationSeconds) : cliMetadata.durationText,
       date: details?.pubdate ? new Date(details.pubdate * 1000).toLocaleDateString('zh-CN') : '',
       views: Number.isFinite(details?.stat?.view) ? details.stat.view : null,

@@ -9,13 +9,14 @@
 - 下载和转写任务持久化 startedAt、endedAt、durationMs；执行耗时不含队列等待，重试重新计时。
 - 已完成历史行显示执行耗时；旧任务缺少 durationMs 时兼容隐藏。
 - 完成的文字稿任务可通过稳定 transcriptId 点击打开对应正文；行内按钮阻止冒泡。
+- 每次转写运行时将视频标题、UP 主和可用合集/系列名称附加到现有 Prompt 前；单视频与 UP 主批量任务均使用各自元数据，普通投稿不生成空合集信息，动态内容不写入日志。
 
 ## 当前验证
 
-- `npm run build`、`node --check server/api.js`、`git diff --check` 通过。
+- 本次 `npm run build`、`node --check server/api.js`、`git diff --check` 通过。
 - 正式 `BiliScribe.vbs` 重启成功；production 健康接口与 `/api/tasks` 均返回 200。
 - 本次未运行任何转写任务或长视频测试。
 
 ## 下一步
 
-- 等待用户确认后再进行完整课程转写测试。
+- 无需为本次变更运行长课程测试；后续按用户指令继续。

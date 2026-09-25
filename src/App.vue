@@ -218,7 +218,7 @@ async function addSingleTask(mode = batchAction.value) {
   try {
     const response = await fetch('/api/tasks', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ url: singleVideo.value.url || url.value, title: singleVideo.value.title, owner: singleVideo.value.owner, mode }),
+      body: JSON.stringify({ url: singleVideo.value.url || url.value, title: singleVideo.value.title, owner: singleVideo.value.owner, groupName: singleVideo.value.collectionName, mode }),
     })
     const result = await response.json()
     if (!response.ok) throw new Error(result.error?.message || '创建下载任务失败。')
@@ -239,7 +239,7 @@ async function createBatchTasks() {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ mode: batchAction.value, videos: selected.map((video) => {
         const group = creatorGroups.value.find((item) => item.videos.some((entry) => entry.id === video.id))
-        return { bvid: video.bvid, title: video.title, owner: video.owner, creatorName: creator.value.name, groupName: group?.title || '其他视频' }
+        return { bvid: video.bvid, title: video.title, owner: video.owner, creatorName: creator.value.name, groupName: group?.kind === 'other' ? '' : group?.title || '' }
       }) }),
     })
     const result = await response.json()
