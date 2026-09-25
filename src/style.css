@@ -836,7 +836,7 @@ h1 { color: #1f2e42; font-size: 26px; letter-spacing: -.45px; }
 .album-subtitle { color: #5f7083; font-size: 13px; }
 .album-expand { min-width: 77px; justify-content: center; margin-left: auto; padding: 8px; color: #355a73; font-size: 13px; }
 .album-expand:hover { border-radius: 6px; background: #e6eef4; }
-.video-list { position: relative; margin: 0 0 0 30px; padding: 5px 0 5px 14px; border-top: 1px solid #e6ebef; background: #fbfcfd; }
+.video-list { position: relative; max-height: min(72vh, calc(100vh - 220px)); margin: 0 0 0 30px; overflow-y: auto; overscroll-behavior-y: contain; padding: 5px 0 5px 14px; border-top: 1px solid #e6ebef; background: #fbfcfd; }
 .video-list::before { position: absolute; top: 7px; bottom: 7px; left: 0; width: 2px; border-radius: 2px; background: #d8e3eb; content: ''; }
 .video-row { min-height: 76px; gap: 12px; padding: 9px 13px 9px 4px; border-bottom-color: #e8edf1; background: transparent; }
 .video-row:hover { background: #f4f8fb; }
