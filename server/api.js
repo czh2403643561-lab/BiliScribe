@@ -37,6 +37,9 @@ const transcriptConnectTimeoutMs = 30_000
 const transcriptStreamIdleTimeoutMs = 120_000
 const defaultDownloadDirectory = path.join(os.homedir(), 'Videos', 'BiliScribe')
 const mediaExtensions = new Set(['.mp4', '.mkv', '.flv', '.m4a', '.mka', '.mp3', '.aac', '.wav', '.flac', '.m4s'])
+const localAudioExtensions = new Set(['.mp3', '.m4a', '.wav', '.flac', '.ogg'])
+const localAudioSelections = new Map()
+const localAudioSelectionTtlMs = 60 * 60 * 1000
 const bilibiliImageHosts = ['hdslb.com', 'bilivideo.com']
 const wbiMixinIndices = [46, 47, 18, 2, 53, 8, 23, 32, 15, 50, 10, 31, 58, 3, 45, 35, 27, 43, 5, 49, 33, 9, 42, 19, 29, 28, 14, 39, 12, 38, 41, 13, 37, 48, 7, 16, 24, 55, 40, 61, 26, 17, 0, 1, 60, 51, 30, 4, 22, 25, 54, 21, 56, 59, 6, 63, 57, 62, 11, 36, 20, 34, 44, 52]
 
@@ -799,6 +802,12 @@ function getDownloadTasks() {
   return [...downloadTasks.values()].sort((left, right) => left.createdAt.localeCompare(right.createdAt))
 }
 
+function publicTask(task) {
+  if (task.source?.type !== 'local') return task
+  const safeSource = Object.fromEntries(Object.entries(task.source).filter(([key]) => key !== 'path'))
+  return { ...task, source: safeSource }
+}
+
 function beginTaskExecution(task) {
   const startedAtMs = Date.now()
   task.startedAt = new Date(startedAtMs).toISOString()
@@ -1213,6 +1222,9 @@ function stopTranscriptWakeLock() {
 }
 
 function transcriptOutputDirectory(task) {
+  if (task.source?.type === 'local') {
+    return path.join(transcriptDirectory, '本地导入', safeDirectoryName(task.groupName || '未分组'))
+  }
   if (task.creatorName && task.groupName) {
     return path.join(transcriptDirectory, safeDirectoryName(task.creatorName), safeDirectoryName(task.groupName), '文字稿')
   }
@@ -1544,6 +1556,99 @@ function probeAudioDuration(ffmpegPath, filePath) {
   return Number.isFinite(duration) && duration > 0 ? duration : null
 }
 
+function runNativeAudioDialog(kind) {
+  if (process.platform !== 'win32') throw Object.assign(new Error('本地音频选择仅支持 Windows。'), { statusCode: 501, code: 'unsupported_platform' })
+  const script = kind === 'folder'
+    ? `$ErrorActionPreference = 'Stop'; [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); Add-Type -AssemblyName System.Windows.Forms; $dialog = New-Object System.Windows.Forms.FolderBrowserDialog; $dialog.Description = '选择包含音频文件的文件夹'; $dialog.ShowNewFolderButton = $false; if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { ConvertTo-Json -Compress -InputObject @{ paths = @($dialog.SelectedPath) } } else { ConvertTo-Json -Compress -InputObject @{ paths = @() } }`
+    : `$ErrorActionPreference = 'Stop'; [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); Add-Type -AssemblyName System.Windows.Forms; $dialog = New-Object System.Windows.Forms.OpenFileDialog; $dialog.Title = '选择本地音频'; $dialog.Multiselect = $true; $dialog.CheckFileExists = $true; $dialog.Filter = '支持的音频文件|*.mp3;*.m4a;*.wav;*.flac;*.ogg'; if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { ConvertTo-Json -Compress -InputObject @{ paths = @($dialog.FileNames) } } else { ConvertTo-Json -Compress -InputObject @{ paths = @() } }`
+  const encodedScript = Buffer.from(script, 'utf16le').toString('base64')
+  return new Promise((resolve, reject) => {
+    const child = spawn('powershell.exe', ['-NoLogo', '-NoProfile', '-STA', '-NonInteractive', '-EncodedCommand', encodedScript], {
+      windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'],
+    })
+    let output = ''
+    let outputExceeded = false
+    child.stdout.on('data', (chunk) => {
+      output += String(chunk)
+      if (output.length > 1024 * 1024) outputExceeded = true
+    })
+    child.once('error', () => reject(Object.assign(new Error('无法打开 Windows 文件选择器。'), { code: 'audio_picker_unavailable' })))
+    child.once('close', (code) => {
+      if (code !== 0 || outputExceeded) return reject(Object.assign(new Error('文件选择器未能完成。'), { code: 'audio_picker_failed' }))
+      try {
+        const selected = JSON.parse(output.replace(/^\uFEFF/, '').trim() || '{}')
+        resolve(Array.isArray(selected?.paths) ? selected.paths.filter((item) => typeof item === 'string') : [])
+      } catch {
+        reject(Object.assign(new Error('文件选择器返回的信息无效。'), { code: 'audio_picker_invalid_response' }))
+      }
+    })
+  })
+}
+
+function pruneLocalAudioSelections() {
+  const cutoff = Date.now() - localAudioSelectionTtlMs
+  for (const [id, item] of localAudioSelections) if (item.createdAt < cutoff) localAudioSelections.delete(id)
+  while (localAudioSelections.size > 10000) localAudioSelections.delete(localAudioSelections.keys().next().value)
+}
+
+function makeLocalAudioSelection(filePath, groupName = '', ffmpegPath = null) {
+  const extension = path.extname(filePath).toLowerCase()
+  if (!localAudioExtensions.has(extension)) return null
+  const stats = fs.statSync(filePath)
+  if (!stats.isFile()) return null
+  const id = randomUUID()
+  const item = {
+    id, path: path.resolve(filePath), originalName: path.basename(filePath), extension,
+    size: stats.size, mtimeMs: stats.mtimeMs, duration: ffmpegPath ? probeAudioDuration(ffmpegPath, filePath) : null,
+    groupName, createdAt: Date.now(),
+  }
+  localAudioSelections.set(id, item)
+  return { id, originalName: item.originalName, extension, size: item.size, duration: item.duration, groupName }
+}
+
+async function selectLocalAudio(response, kind) {
+  pruneLocalAudioSelections()
+  const selectedPaths = await runNativeAudioDialog(kind)
+  if (!selectedPaths.length) {
+    sendJson(response, 200, { files: [], ignoredCount: 0, cancelled: true })
+    return
+  }
+  let ignoredCount = 0
+  let files = []
+  const ffmpegPath = findFFmpeg()
+  if (kind === 'folder') {
+    const folderPath = path.resolve(selectedPaths[0])
+    let entries
+    try { entries = fs.readdirSync(folderPath, { withFileTypes: true }) } catch {
+      throw Object.assign(new Error('无法读取所选文件夹。'), { statusCode: 400, code: 'selected_folder_unreadable' })
+    }
+    const groupName = path.basename(folderPath)
+    for (const entry of entries) {
+      if (!entry.isFile()) continue
+      const filePath = path.join(folderPath, entry.name)
+      if (!localAudioExtensions.has(path.extname(entry.name).toLowerCase())) { ignoredCount += 1; continue }
+      try {
+        const item = makeLocalAudioSelection(filePath, groupName, ffmpegPath)
+        if (item) files.push(item)
+      } catch { ignoredCount += 1 }
+    }
+  } else {
+    for (const filePath of selectedPaths) {
+      try {
+        const item = makeLocalAudioSelection(filePath, '', ffmpegPath)
+        if (item) files.push(item)
+        else ignoredCount += 1
+      } catch { ignoredCount += 1 }
+    }
+  }
+  if (files.length > 3000) {
+    for (const file of files) localAudioSelections.delete(file.id)
+    throw Object.assign(new Error('一次最多导入 3000 个音频文件。'), { statusCode: 400, code: 'too_many_local_audio_files' })
+  }
+  log('info', 'Local audio files selected', { count: files.length, ignoredCount, source: kind })
+  sendJson(response, 200, { files, ignoredCount, cancelled: false })
+}
+
 function transcriptSegmentFilename(segment) {
   if (!/^\d{3}[ab]{0,2}$/.test(segment.id)) throw transcriptFailure('invalid_segment_id', '转写分段编号无效。')
   return `segment-${segment.id}.m4a`
@@ -1587,6 +1692,14 @@ function buildTranscriptPrompt(task, basePrompt) {
   const clean = (value) => String(value || '').replace(/[\r\n\t]+/g, ' ').trim()
   const title = clean(task.title)
   const collectionName = clean(task.groupName)
+  if (task.source?.type === 'local') {
+    const lines = ['课程上下文：']
+    if (title && title !== task.source.originalName) lines.push(`标题：${title}`)
+    if (collectionName) lines.push(`课程/批次：${collectionName}`)
+    if (lines.length === 1) return basePrompt
+    lines.push('', '说明：', '这些信息仅用于辅助判断书名、人名、术语和课程主题。', '必须以实际音频内容为准。', '不得根据标题或课程名称补充音频中没有出现的内容。')
+    return `${lines.join('\n')}\n\n${basePrompt}`
+  }
   const owner = clean(task.creatorName || task.owner)
   const lines = ['课程上下文：']
   if (title && title !== task.bvid) lines.push(`标题：${title}`)
@@ -1603,6 +1716,7 @@ async function runTranscriptTask(task) {
   const sourceDownloadDirectory = path.join(ownedWorkDirectory, 'source-audio')
   const segmentDirectory = path.join(ownedWorkDirectory, 'audio-segments')
   let sourceAudio = null
+  let sourceFingerprint = null
   let checkpoint = null
   let segments = []
   task.status = 'running'
@@ -1617,29 +1731,48 @@ async function runTranscriptTask(task) {
   log('info', 'Transcript task started', { taskId: task.id, bvid: task.bvid, mode: task.mode })
   startTranscriptWakeLock(task)
   try {
+    if (task.source?.type === 'local') {
+      const sourcePath = path.resolve(String(task.source.path || ''))
+      let sourceStats
+      try { sourceStats = await fs.promises.stat(sourcePath) } catch {
+        throw transcriptFailure('local_audio_missing', '源音频文件不存在或已被移动。')
+      }
+      if (!sourceStats.isFile() || !localAudioExtensions.has(path.extname(sourcePath).toLowerCase())) {
+        throw transcriptFailure('local_audio_missing', '源音频文件不存在或已被移动。')
+      }
+      sourceAudio = sourcePath
+      task.source.path = sourcePath
+      task.source.size = sourceStats.size
+      task.source.mtimeMs = sourceStats.mtimeMs
+      sourceFingerprint = { path: sourcePath, size: sourceStats.size, mtimeMs: sourceStats.mtimeMs }
+      saveLocalState()
+      log('info', 'Local transcript source verified', { taskId: task.id, size: sourceStats.size })
+    }
     if (!mimoApiKey) throw transcriptFailure('mimo_key_missing', '请先在设置中配置 MiMo API Key。')
     const ffmpegPath = findFFmpeg()
     if (!ffmpegPath) throw transcriptFailure('ffmpeg_unavailable', '未找到 FFmpeg，请安装后重试转写。')
     await ensureWritableDirectory(transcriptDirectory)
     await fs.promises.mkdir(ownedWorkDirectory, { recursive: true })
     await fs.promises.mkdir(sourceDownloadDirectory, { recursive: true })
-    sourceAudio = matchingCompletedAudio(task)
-    if (sourceAudio) {
-      log('info', 'Transcript audio reused', { taskId: task.id, bvid: task.bvid, source: 'completed-audio-download' })
-    } else {
-      if (!fs.existsSync(executablePath)) throw transcriptFailure('bbdown_unavailable', '未找到 BBDownNext，无法获取转写音频。')
-      const previousAudioFiles = await listMediaFiles(sourceDownloadDirectory, 'audio')
-      if (previousAudioFiles.length) {
-        sourceAudio = previousAudioFiles[0].path
-        log('info', 'Transcript temporary audio reused', { taskId: task.id, bvid: task.bvid, fileSize: previousAudioFiles[0].size })
+    if (task.source?.type !== 'local') {
+      sourceAudio = matchingCompletedAudio(task)
+      if (sourceAudio) {
+        log('info', 'Transcript audio reused', { taskId: task.id, bvid: task.bvid, source: 'completed-audio-download' })
       } else {
-        const args = [task.url, '--get', 'a', '--work-dir', sourceDownloadDirectory, '--file-pattern', '<videoTitle>', '--stop-on-error', '--mux', 'None']
-        log('info', 'Transcript audio download started', { taskId: task.id, bvid: task.bvid })
-        await runTranscriptProcess(task, executablePath, args, '准备音频')
-        const audioFiles = await listMediaFiles(sourceDownloadDirectory, 'audio')
-        if (!audioFiles.length) throw transcriptFailure('transcript_audio_missing', 'BBDownNext 已结束，但没有找到音频文件。')
-        sourceAudio = audioFiles[0].path
-        log('info', 'Transcript audio downloaded temporarily', { taskId: task.id, bvid: task.bvid, fileSize: audioFiles[0].size })
+        if (!fs.existsSync(executablePath)) throw transcriptFailure('bbdown_unavailable', '未找到 BBDownNext，无法获取转写音频。')
+        const previousAudioFiles = await listMediaFiles(sourceDownloadDirectory, 'audio')
+        if (previousAudioFiles.length) {
+          sourceAudio = previousAudioFiles[0].path
+          log('info', 'Transcript temporary audio reused', { taskId: task.id, bvid: task.bvid, fileSize: previousAudioFiles[0].size })
+        } else {
+          const args = [task.url, '--get', 'a', '--work-dir', sourceDownloadDirectory, '--file-pattern', '<videoTitle>', '--stop-on-error', '--mux', 'None']
+          log('info', 'Transcript audio download started', { taskId: task.id, bvid: task.bvid })
+          await runTranscriptProcess(task, executablePath, args, '准备音频')
+          const audioFiles = await listMediaFiles(sourceDownloadDirectory, 'audio')
+          if (!audioFiles.length) throw transcriptFailure('transcript_audio_missing', 'BBDownNext 已结束，但没有找到音频文件。')
+          sourceAudio = audioFiles[0].path
+          log('info', 'Transcript audio downloaded temporarily', { taskId: task.id, bvid: task.bvid, fileSize: audioFiles[0].size })
+        }
       }
     }
     if (task.cancelRequested) throw transcriptFailure('transcript_cancelled', '任务已取消。')
@@ -1653,6 +1786,7 @@ async function runTranscriptTask(task) {
       && existingCheckpoint.processingVersion === transcriptProcessingVersion
       && existingCheckpoint.bvid === task.bvid
       && existingCheckpoint.sourceAudioHash === sourceAudioHash
+      && JSON.stringify(existingCheckpoint.sourceFingerprint || null) === JSON.stringify(sourceFingerprint)
       && existingCheckpoint.promptHash === promptHash
     if (checkpointMatches) {
       checkpoint = existingCheckpoint
@@ -1664,6 +1798,7 @@ async function runTranscriptTask(task) {
         log('info', 'Transcript checkpoint invalidated', {
           taskId: task.id, bvid: task.bvid,
           reason: existingCheckpoint.processingVersion !== transcriptProcessingVersion ? 'audio_processing_changed'
+            : JSON.stringify(existingCheckpoint.sourceFingerprint || null) !== JSON.stringify(sourceFingerprint) ? 'source_file_changed'
             : existingCheckpoint.sourceAudioHash !== sourceAudioHash ? 'source_audio_changed' : 'prompt_changed',
         })
       }
@@ -1727,7 +1862,7 @@ async function runTranscriptTask(task) {
         }
       }
       checkpoint = {
-        processingVersion: transcriptProcessingVersion, taskId: task.id, bvid: task.bvid, sourceAudioHash, promptHash,
+        processingVersion: transcriptProcessingVersion, taskId: task.id, bvid: task.bvid, sourceAudioHash, sourceFingerprint, promptHash,
         segmentCount: segments.length, segments, completedSegments: [], currentSegment: null,
         createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
       }
@@ -1820,7 +1955,8 @@ async function runTranscriptTask(task) {
     await fs.promises.writeFile(outputPath, `${text}\n`, 'utf8')
     const completedAt = new Date().toISOString()
     const entry = {
-      id: task.id, title: task.title, creator: task.creatorName || task.owner || '未知 UP 主', bvid: task.bvid,
+      id: task.id, title: task.title, creator: task.source?.type === 'local' ? '本地音频' : task.creatorName || task.owner || '未知 UP 主',
+      sourceType: task.source?.type === 'local' ? 'local' : 'bilibili', originalName: task.source?.originalName || '', bvid: task.bvid,
       completedAt, textPath: outputPath, text, wordCount: Array.from(text.replace(/\s/gu, '')).length,
     }
     const library = readTranscriptLibrary().filter((item) => item.id !== task.id)
@@ -1893,6 +2029,7 @@ async function createDownloadTask(request, response) {
   const { bvid, canonicalUrl } = normalizeVideoUrl(body.url)
   const task = {
     id: randomUUID(), bvid, url: canonicalUrl,
+    source: { type: 'bilibili' },
     title: String(body.title || bvid).slice(0, 300),
     owner: String(body.owner || '未知 UP 主').slice(0, 120),
     creatorName: '', groupName: String(body.groupName || '').slice(0, 120),
@@ -1904,7 +2041,7 @@ async function createDownloadTask(request, response) {
   downloadTasks.set(task.id, task)
   saveLocalState()
   log('info', task.mode === 'transcript' ? 'Transcript task created' : 'Download task created', { taskId: task.id, bvid, mode: task.mode })
-  sendJson(response, 201, { task })
+  sendJson(response, 201, { task: publicTask(task) })
   void pumpDownloadQueue()
 }
 
@@ -1932,7 +2069,7 @@ async function createBatchDownloadTasks(request, response) {
   })
   const unique = [...new Map(normalized.map((video) => [video.bvid, video])).values()]
   const tasks = unique.map((video) => ({
-    id: randomUUID(), ...video, mode: body.mode, status: 'waiting', phase: '等待中', progress: null,
+    id: randomUUID(), ...video, source: { type: 'bilibili' }, mode: body.mode, status: 'waiting', phase: '等待中', progress: null,
     outputPath: '', outputDirectory: '', outputFiles: [], fileSize: 0, error: '',
     createdAt: new Date().toISOString(), completedAt: null,
     startedAt: null, endedAt: null, durationMs: null, attempt: 0,
@@ -1941,6 +2078,42 @@ async function createBatchDownloadTasks(request, response) {
   saveLocalState()
   log('info', body.mode === 'transcript' ? 'Creator batch transcript tasks created' : 'Creator batch download tasks created', { count: tasks.length, mode: body.mode })
   sendJson(response, 201, { tasks: tasks.map(({ id, bvid, title, owner, mode, status, createdAt }) => ({ id, bvid, title, owner, mode, status, createdAt })) })
+  void pumpDownloadQueue()
+}
+
+async function createLocalAudioTasks(request, response) {
+  pruneLocalAudioSelections()
+  const body = await readJsonBody(request, 2 * 1024 * 1024)
+  if (!Array.isArray(body.items) || !body.items.length || body.items.length > 3000) {
+    sendError(response, 400, 'invalid_local_audio_batch', '请选择 1 到 3000 个音频文件后再创建任务。')
+    return
+  }
+  const normalized = body.items.map((input) => {
+    if (!input || typeof input.selectionId !== 'string' || typeof input.title !== 'string') {
+      throw Object.assign(new Error('本地音频选择信息无效，请重新导入。'), { statusCode: 400, code: 'invalid_local_audio_selection' })
+    }
+    const selected = localAudioSelections.get(input.selectionId)
+    if (!selected || Date.now() - selected.createdAt > localAudioSelectionTtlMs) {
+      throw Object.assign(new Error('音频选择已过期，请重新导入文件。'), { statusCode: 400, code: 'local_audio_selection_expired' })
+    }
+    return { selected, title: String(input.title.trim() || path.parse(selected.originalName).name).slice(0, 300) }
+  })
+  const tasks = normalized.map(({ selected, title }) => ({
+    id: randomUUID(), bvid: null, url: '', title, owner: '', creatorName: '', groupName: selected.groupName,
+    source: {
+      type: 'local', path: selected.path, originalName: selected.originalName, size: selected.size,
+      duration: selected.duration, mtimeMs: selected.mtimeMs, extension: selected.extension,
+    },
+    mode: 'transcript', status: 'waiting', phase: '等待中', progress: null,
+    outputPath: '', outputDirectory: '', outputFiles: [], fileSize: 0, error: '',
+    createdAt: new Date().toISOString(), completedAt: null,
+    startedAt: null, endedAt: null, durationMs: null, attempt: 0,
+  }))
+  for (const input of body.items) localAudioSelections.delete(input.selectionId)
+  for (const task of tasks) downloadTasks.set(task.id, task)
+  saveLocalState()
+  log('info', 'Local audio transcript tasks created', { count: tasks.length })
+  sendJson(response, 201, { tasks: tasks.map(publicTask) })
   void pumpDownloadQueue()
 }
 
@@ -2067,7 +2240,7 @@ async function listTranscripts(response) {
 
 async function handleTaskAction(request, response, method, pathname) {
   if (pathname === '/api/tasks' && method === 'GET') {
-    sendJson(response, 200, { tasks: getDownloadTasks(), downloadDirectory })
+    sendJson(response, 200, { tasks: getDownloadTasks().map(publicTask), downloadDirectory })
     return
   }
   if (pathname === '/api/tasks' && method === 'POST') {
@@ -2084,7 +2257,7 @@ async function handleTaskAction(request, response, method, pathname) {
     }
     saveLocalState()
     log('info', 'Download task history cleared')
-    sendJson(response, 200, { tasks: getDownloadTasks() })
+    sendJson(response, 200, { tasks: getDownloadTasks().map(publicTask) })
     return
   }
   const match = pathname.match(/^\/api\/tasks\/([0-9a-f-]{36})(?:\/(cancel|retry|open))?$/i)
@@ -2109,7 +2282,7 @@ async function handleTaskAction(request, response, method, pathname) {
     log('info', 'Download task cancellation requested', { taskId: id, bvid: task.bvid })
     killDownloadTree(activeDownloadChild)
     activeTaskAbortController?.abort('cancelled')
-    sendJson(response, 200, { task })
+    sendJson(response, 200, { task: publicTask(task) })
     return true
   }
   if (method === 'POST' && action === 'open' && task.status === 'completed' && task.outputPath) {
@@ -2155,7 +2328,7 @@ async function handleTaskAction(request, response, method, pathname) {
     task.cancelRequested = false
     saveLocalState()
     log('info', 'Failed download task retried', { taskId: id, bvid: task.bvid, mode: task.mode })
-    sendJson(response, 200, { task })
+    sendJson(response, 200, { task: publicTask(task) })
     void pumpDownloadQueue()
     return true
   }
@@ -2277,6 +2450,15 @@ const server = http.createServer(async (request, response) => {
       statusCode = response.statusCode || 200
     } else if (method === 'POST' && pathname === '/api/settings/mimo/test') {
       await testMiMoConnection(request, response)
+      statusCode = response.statusCode || 200
+    } else if (method === 'POST' && pathname === '/api/local-audio/select-files') {
+      await selectLocalAudio(response, 'files')
+      statusCode = response.statusCode || 200
+    } else if (method === 'POST' && pathname === '/api/local-audio/select-folder') {
+      await selectLocalAudio(response, 'folder')
+      statusCode = response.statusCode || 200
+    } else if (method === 'POST' && pathname === '/api/local-audio/tasks') {
+      await createLocalAudioTasks(request, response)
       statusCode = response.statusCode || 200
     } else if (method === 'GET' && pathname === '/api/transcripts') {
       await listTranscripts(response)

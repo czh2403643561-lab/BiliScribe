@@ -927,3 +927,48 @@ h1 { color: #1f2e42; font-size: 26px; letter-spacing: -.45px; }
 .qr-note.qr-expired, .qr-note.qr-failed { color: #bd5d57; }
 .qr-error-message { margin: -3px 0 10px !important; color: #bd5d57 !important; }
 .modal-disclaimer { display: block; margin-top: 15px; color: #66778a; font-size: 12px; line-height: 1.5; }
+
+.source-switch { display: inline-flex; gap: 4px; margin: 0 0 16px; padding: 4px; border: 1px solid #e6edf2; border-radius: 9px; background: #f6f9fb; }
+.source-switch button { min-width: 100px; height: 32px; padding: 0 12px; border: 0; border-radius: 6px; background: transparent; color: #6e7d90; cursor: pointer; font-size: 12px; }
+.source-switch button.active { background: white; color: #147abd; box-shadow: 0 1px 4px rgba(40, 64, 84, .12); font-weight: 600; }
+.local-audio-panel { padding: 22px; }
+.local-audio-heading { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+.local-audio-heading h2 { margin: 0; color: #25384d; font-size: 19px; }
+.local-audio-heading p { margin: 6px 0 0; color: #738297; font-size: 13px; }
+.local-audio-actions { display: flex; gap: 9px; }
+.local-audio-formats { margin-top: 17px; color: #8290a0; font-size: 12px; }
+.local-audio-notice { display: flex; align-items: center; gap: 7px; margin-top: 14px; color: #4c856d; font-size: 12px; }
+.local-audio-list-wrap { margin-top: 18px; border: 1px solid #e8edf1; border-radius: 9px; }
+.local-audio-toolbar { display: flex; min-height: 45px; align-items: center; gap: 14px; padding: 0 13px; border-bottom: 1px solid #e8edf1; color: #7a899a; font-size: 12px; }
+.local-audio-toolbar > span { margin-right: auto; }
+.local-audio-toolbar .text-action { font-size: 12px; }
+.local-audio-list { max-height: 520px; overflow: auto; padding: 0 13px; }
+.local-audio-row { display: flex; min-height: 68px; align-items: center; gap: 12px; border-bottom: 1px solid #edf0f3; }
+.local-audio-row:last-child { border-bottom: 0; }
+.local-file-icon { flex: 0 0 auto; color: #438ab7; }
+.local-audio-main { display: flex; min-width: 0; flex: 1; flex-direction: column; gap: 5px; }
+.local-audio-title { width: min(100%, 640px); height: 27px; padding: 2px 6px; border: 1px solid transparent; border-radius: 4px; outline: none; color: #30445a; font-size: 13px; font-weight: 600; }
+.local-audio-title:hover, .local-audio-title:focus { border-color: #dce8f0; background: #fbfdfe; }
+.local-audio-meta { display: flex; min-width: 0; align-items: center; gap: 8px; color: #8995a3; font-size: 11px; }
+.local-audio-meta > span:first-child { overflow: hidden; max-width: 360px; text-overflow: ellipsis; white-space: nowrap; }
+.local-audio-meta i { width: 3px; height: 3px; flex: 0 0 auto; border-radius: 50%; background: #b9c3cc; }
+.local-audio-course { overflow: hidden; max-width: 240px; text-overflow: ellipsis; white-space: nowrap; color: #5686a5; }
+.local-remove-button { flex: 0 0 auto; color: #8b98a6; }
+.local-audio-empty { display: flex; min-height: 220px; align-items: center; justify-content: center; flex-direction: column; gap: 9px; color: #94a1af; }
+.local-audio-empty strong { color: #4e6074; font-size: 14px; }
+.local-audio-empty span { font-size: 12px; }
+.local-audio-footer { display: flex; align-items: center; justify-content: space-between; margin-top: 18px; padding-top: 16px; border-top: 1px solid #edf0f3; color: #69798c; font-size: 13px; }
+.local-audio-footer strong { color: #2c435a; }
+.transcript-source-tag { display: inline-block; margin-right: 5px; padding: 1px 5px; border-radius: 4px; background: #edf5fa; color: #507d99; font-size: 10px; }
+@media (max-width: 760px) {
+  .local-audio-panel { padding: 15px; }
+  .local-audio-heading { align-items: flex-start; flex-direction: column; }
+  .local-audio-actions { width: 100%; }
+  .local-audio-actions button { flex: 1; }
+  .local-audio-toolbar { flex-wrap: wrap; padding: 8px; gap: 8px; }
+  .local-audio-toolbar > span { margin-right: auto; }
+  .local-audio-list { padding: 0 8px; }
+  .local-audio-row { gap: 7px; }
+  .local-audio-meta { flex-wrap: wrap; gap: 5px; }
+  .local-audio-meta > span:first-child { max-width: 100%; }
+}

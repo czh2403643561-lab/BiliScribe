@@ -34,6 +34,12 @@ const isParsing = ref(false)
 const parseState = ref('idle')
 const parseErrorKind = ref('')
 const parseErrorMessage = ref('')
+const newTaskSource = ref('bilibili')
+const localAudioFiles = ref([])
+const localAudioSelectedIds = ref(new Set())
+const localAudioPickerBusy = ref('')
+const localAudioNotice = ref('')
+const selectedLocalAudioCount = computed(() => localAudioSelectedIds.value.size)
 const isCreatorInput = computed(() => /^https?:\/\/(?:www\.)?space\.bilibili\.com\/\d+(?:\/|\?|$)/i.test(url.value.trim()))
 const currentPage = ref(1)
 const creatorSearch = ref('')
@@ -162,6 +168,10 @@ const modeOptions = [
 ]
 const taskNames = { video: '视频下载', audio: '音频下载', transcript: '文字稿转写' }
 const taskIcon = { video: Film, audio: AudioLines, transcript: FileText }
+function taskDisplayName(task) {
+  if (task.mode !== 'transcript') return taskNames[task.mode]
+  return `文字稿转写 · ${task.source?.type === 'local' ? '本地音频' : 'Bilibili'}`
+}
 const CalendarIcon = CalendarDays
 const SlidersIcon = SlidersHorizontal
 const tasks = ref([])
@@ -410,6 +420,94 @@ function markSettingsSaved() {
   settingsSaved.value = true
   clearTimeout(settingsSavedTimer)
   settingsSavedTimer = setTimeout(() => { settingsSaved.value = false }, 1800)
+}
+
+async function selectLocalAudio(kind) {
+  if (localAudioPickerBusy.value) return
+  localAudioPickerBusy.value = kind
+  localAudioNotice.value = ''
+  try {
+    const response = await fetch(`/api/local-audio/select-${kind}`, { method: 'POST' })
+    const result = await response.json()
+    if (!response.ok) throw new Error(result.error?.message || '无法打开文件选择器。')
+    if (result.cancelled) return
+    if (result.ignoredCount) localAudioNotice.value = `已忽略 ${result.ignoredCount} 个不支持的文件`
+    if (!result.files?.length) {
+      const message = kind === 'folder' ? '所选文件夹中没有支持的音频文件' : '没有选择支持的音频文件'
+      localAudioNotice.value = result.ignoredCount ? `${message}；已忽略 ${result.ignoredCount} 个不支持的文件` : message
+      notify(localAudioNotice.value)
+      return
+    }
+    const existingIds = new Set(localAudioFiles.value.map((file) => file.id))
+    const addedFiles = result.files.filter((file) => !existingIds.has(file.id)).map((file) => ({ ...file, title: file.originalName.replace(/\.[^.]+$/, '') }))
+    localAudioFiles.value = [...localAudioFiles.value, ...addedFiles]
+    localAudioSelectedIds.value = new Set([...localAudioSelectedIds.value, ...addedFiles.map((file) => file.id)])
+    if (result.ignoredCount) notify(`已导入 ${addedFiles.length} 个音频；已忽略 ${result.ignoredCount} 个不支持的文件`)
+  } catch (error) {
+    notify(error.message || '本地音频导入失败。')
+  } finally {
+    localAudioPickerBusy.value = ''
+  }
+}
+
+function toggleLocalAudioSelection(id) {
+  const next = new Set(localAudioSelectedIds.value)
+  if (next.has(id)) next.delete(id)
+  else next.add(id)
+  localAudioSelectedIds.value = next
+}
+
+function selectAllLocalAudio() {
+  localAudioSelectedIds.value = new Set(localAudioFiles.value.map((file) => file.id))
+}
+
+function clearLocalAudioSelection() {
+  localAudioSelectedIds.value = new Set()
+}
+
+function removeLocalAudio(id) {
+  localAudioFiles.value = localAudioFiles.value.filter((file) => file.id !== id)
+  const next = new Set(localAudioSelectedIds.value)
+  next.delete(id)
+  localAudioSelectedIds.value = next
+}
+
+function clearLocalAudioFiles() {
+  localAudioFiles.value = []
+  localAudioSelectedIds.value = new Set()
+  localAudioNotice.value = ''
+}
+
+function formatMediaDuration(seconds) {
+  const duration = Math.max(0, Math.floor(Number(seconds) || 0))
+  if (!duration) return '—'
+  const minutes = Math.floor(duration / 60)
+  const remainder = duration % 60
+  return minutes >= 60
+    ? `${Math.floor(minutes / 60)}:${String(minutes % 60).padStart(2, '0')}:${String(remainder).padStart(2, '0')}`
+    : `${minutes}:${String(remainder).padStart(2, '0')}`
+}
+
+async function createLocalAudioTasks() {
+  const selected = localAudioFiles.value.filter((file) => localAudioSelectedIds.value.has(file.id))
+  if (!selected.length) return
+  try {
+    const response = await fetch('/api/local-audio/tasks', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ items: selected.map(({ id, title, originalName }) => ({ selectionId: id, title: title?.trim() || originalName.replace(/\.[^.]+$/, '') })) }),
+    })
+    const result = await response.json()
+    if (!response.ok) throw new Error(result.error?.message || '创建本地转写任务失败。')
+    const createdIds = new Set(selected.map((file) => file.id))
+    localAudioFiles.value = localAudioFiles.value.filter((file) => !createdIds.has(file.id))
+    localAudioSelectedIds.value = new Set([...localAudioSelectedIds.value].filter((id) => !createdIds.has(id)))
+    await refreshTasks()
+    taskTab.value = 'active'
+    page.value = 'tasks'
+    notify(`已创建 ${result.tasks?.length || selected.length} 个本地转写任务`)
+  } catch (error) {
+    notify(error.message || '创建本地转写任务失败。')
+  }
 }
 
 async function openTranscriptTask(task) {
@@ -696,7 +794,7 @@ onUnmounted(() => { clearInterval(taskPollTimer); clearInterval(qrPollTimer); cl
       <div class="sidebar-queue-card">
         <div class="queue-card-top"><span class="live-dot"></span><span>任务队列</span><span class="queue-count">{{ queueCount + (runningTask ? 1 : 0) }}</span></div>
         <div class="queue-card-title">{{ runningTask ? '正在处理任务' : '队列空闲' }}</div>
-        <div class="queue-card-meta"><span>{{ runningTask ? (runningTask.phase || taskNames[runningTask.mode]) : '等待添加任务' }}</span><span v-if="runningTask">{{ taskNames[runningTask.mode] }}</span></div>
+        <div class="queue-card-meta"><span>{{ runningTask ? (runningTask.phase || taskNames[runningTask.mode]) : '等待添加任务' }}</span><span v-if="runningTask">{{ taskDisplayName(runningTask) }}</span></div>
       </div>
       <div class="sidebar-footer"><span class="avatar">B</span><div><strong>本机工作区</strong><span>本地 UI 原型</span></div><button class="icon-button"><MoreHorizontal :size="18" /></button></div>
     </aside>
@@ -710,10 +808,16 @@ onUnmounted(() => { clearInterval(taskPollTimer); clearInterval(qrPollTimer); cl
       <div class="page-scroll">
         <section v-if="page === 'new'" class="page-content new-page">
           <div class="page-heading">
-            <div><div class="eyebrow">BILISCRIBE WORKSPACE</div><h1>新建任务</h1><p>粘贴视频或 UP 主链接，选择你要处理的内容。</p></div>
+            <div><div class="eyebrow">BILISCRIBE WORKSPACE</div><h1>新建任务</h1><p>{{ newTaskSource === 'local' ? '导入本机音频，使用当前 MiMo 配置生成文字稿。' : '粘贴视频或 UP 主链接，选择你要处理的内容。' }}</p></div>
             <div class="heading-note"><ShieldCheck :size="16" /><span>所有操作均在本机进行</span></div>
           </div>
 
+          <div class="source-switch" role="tablist" aria-label="任务来源">
+            <button role="tab" :aria-selected="newTaskSource === 'bilibili'" :class="{ active: newTaskSource === 'bilibili' }" @click="newTaskSource = 'bilibili'">B站内容</button>
+            <button role="tab" :aria-selected="newTaskSource === 'local'" :class="{ active: newTaskSource === 'local' }" @click="newTaskSource = 'local'">本地音频</button>
+          </div>
+
+          <template v-if="newTaskSource === 'bilibili'">
           <div class="link-panel panel">
             <div class="link-panel-title"><div class="step-icon"><Link2 :size="18" /></div><div><strong>添加 B 站链接</strong><span>支持单个视频或 UP 主主页</span></div><span class="supported-tag">Bilibili</span></div>
             <div class="link-entry"><div class="url-input-wrap"><Link2 :size="17" /><input v-model="url" aria-label="B站视频或UP主主页链接" placeholder="粘贴 B 站视频或 UP 主主页链接" @keydown.enter="parseLink" /><button v-if="url" class="input-clear" aria-label="清空链接" @click="url = ''"><X :size="15" /></button></div><button class="primary-button parse-button" :disabled="isParsing" @click="parseLink"><LoaderCircle v-if="isParsing" class="spin" :size="16" /><Search v-else :size="16" />{{ isParsing ? '解析中' : '解析链接' }}</button></div>
@@ -757,6 +861,37 @@ onUnmounted(() => { clearInterval(taskPollTimer); clearInterval(qrPollTimer); cl
             <div class="section-heading"><div><div class="eyebrow">解析结果</div><h2>单个视频</h2></div><span class="result-chip"><Check :size="14" />已识别</span></div>
             <div class="single-video-card"><div class="single-cover thumb-art" :class="singleVideo.cover && !singleCoverFailed ? 'has-real-cover' : 'cover-unavailable'"><img v-if="singleVideo.cover && !singleCoverFailed" class="real-cover" :src="singleVideo.cover" alt="视频封面" @error="singleCoverFailed = true" /><span v-else class="cover-placeholder">封面暂不可用</span><span class="thumb-duration">{{ singleVideo.duration }}</span></div><div class="single-video-info"><span class="video-eyebrow"><Radio :size="13" />真实解析结果</span><h3>{{ singleVideo.title }}</h3><div class="single-meta"><span><UserRound :size="14" />{{ singleVideo.owner }}</span><span v-if="singleVideo.bvid">{{ singleVideo.bvid }}</span><span v-if="singleVideo.date">{{ singleVideo.date }}</span><span v-if="singleVideo.views !== null">{{ Number(singleVideo.views).toLocaleString('zh-CN') }} 播放</span></div><div class="single-divider"></div><div class="mode-label">选择处理方式</div><div class="mode-options"><button v-for="mode in modeOptions" :key="mode.id" class="mode-option" :class="{ active: batchAction === mode.id, disabled: mode.disabled }" :disabled="mode.disabled" :title="mode.disabled ? '文字稿功能将在后续版本接入' : ''" @click="batchAction = mode.id"><component :is="mode.icon" :size="17" /><span>{{ mode.label }}</span><span v-if="mode.disabled" class="mode-disabled-label">下一阶段</span><span v-else class="mode-radio"><i></i></span></button></div><button class="primary-button single-action" @click="addSingleTask(batchAction)"><Plus :size="16" />创建任务</button></div></div>
           </div>
+          </template>
+          <div v-else class="local-audio-panel panel">
+            <div class="local-audio-heading">
+              <div><div class="eyebrow">LOCAL AUDIO</div><h2>本地音频转写</h2><p>导入本机音频，使用当前 MiMo 配置生成文字稿。</p></div>
+              <div class="local-audio-actions">
+                <button class="outline-button" :disabled="!!localAudioPickerBusy" @click="selectLocalAudio('files')"><LoaderCircle v-if="localAudioPickerBusy === 'files'" class="spin" :size="15" /><FileAudio v-else :size="15" />选择文件</button>
+                <button class="primary-button" :disabled="!!localAudioPickerBusy" @click="selectLocalAudio('folder')"><LoaderCircle v-if="localAudioPickerBusy === 'folder'" class="spin" :size="15" /><FolderOpen v-else :size="15" />选择文件夹</button>
+              </div>
+            </div>
+            <div class="local-audio-formats">支持 MP3、M4A、WAV、FLAC、OGG。选择文件夹时只读取当前层级。</div>
+            <div v-if="localAudioNotice" class="local-audio-notice"><Check :size="14" />{{ localAudioNotice }}</div>
+            <div v-if="localAudioFiles.length" class="local-audio-list-wrap">
+              <div class="local-audio-toolbar">
+                <label class="check-label"><input type="checkbox" :checked="localAudioFiles.length > 0 && selectedLocalAudioCount === localAudioFiles.length" @change="$event.target.checked ? selectAllLocalAudio() : clearLocalAudioSelection()" /><span class="custom-check"><Check :size="12" /></span><span>全选</span></label>
+                <span>{{ localAudioFiles.length }} 个已导入</span>
+                <button class="text-action" @click="selectAllLocalAudio"><CheckCheck :size="14" />全选</button>
+                <button class="text-action muted" @click="clearLocalAudioSelection"><XCircle :size="14" />取消全部</button>
+                <button class="text-action muted" @click="clearLocalAudioFiles"><Trash2 :size="14" />清空列表</button>
+              </div>
+              <div class="local-audio-list">
+                <div v-for="file in localAudioFiles" :key="file.id" class="local-audio-row">
+                  <label class="check-label"><input type="checkbox" :checked="localAudioSelectedIds.has(file.id)" @change="toggleLocalAudioSelection(file.id)" /><span class="custom-check"><Check :size="12" /></span></label>
+                  <FileAudio :size="18" class="local-file-icon" />
+                  <div class="local-audio-main"><input v-model="file.title" class="local-audio-title" :aria-label="`任务标题：${file.originalName}`" /><div class="local-audio-meta"><span>{{ file.originalName }}</span><i></i><span>{{ formatMediaDuration(file.duration) }}</span><i></i><span>{{ file.extension.replace('.', '').toUpperCase() }}</span><i></i><span>{{ formatFileSize(file.size) }}</span><span v-if="file.groupName" class="local-audio-course">{{ file.groupName }}</span></div></div>
+                  <button class="icon-button local-remove-button" :aria-label="`移除 ${file.originalName}`" title="移除" @click="removeLocalAudio(file.id)"><X :size="16" /></button>
+                </div>
+              </div>
+            </div>
+            <div v-else class="local-audio-empty"><FileAudio :size="24" /><strong>还没有导入音频</strong><span>可以多选音频文件，或选择一个文件夹导入其中的音频。</span></div>
+            <div class="local-audio-footer"><span>已选择 <strong>{{ selectedLocalAudioCount }}</strong> 个</span><button class="primary-button" :disabled="!selectedLocalAudioCount || !!localAudioPickerBusy" @click="createLocalAudioTasks"><FileText :size="15" />创建 {{ selectedLocalAudioCount }} 个转写任务</button></div>
+          </div>
         </section>
 
         <section v-else-if="page === 'tasks'" class="page-content tasks-page">
@@ -764,12 +899,12 @@ onUnmounted(() => { clearInterval(taskPollTimer); clearInterval(qrPollTimer); cl
           <div class="task-section panel">
             <div class="task-toolbar"><div class="filter-tabs"><button :class="{ active: taskTab === 'active' }" @click="taskTab = 'active'">正在处理<span v-if="activeTasks.length">{{ activeTasks.length }}</span></button><button :class="{ active: taskTab === 'history' }" @click="taskTab = 'history'">已完成<span v-if="historyTasks.length">{{ historyTasks.length }}</span></button></div></div>
             <div v-if="taskTab === 'active'" class="download-list">
-              <div v-if="runningTask" class="download-row running-row"><div class="task-type-icon" :class="runningTask.mode"><component :is="taskIcon[runningTask.mode]" :size="19" /></div><div class="download-task-main"><div class="download-task-title"><strong>{{ runningTask.title }}</strong><span class="download-mode">{{ taskNames[runningTask.mode] }}</span></div><div class="download-phase"><span class="task-status running">{{ runningTask.phase || '准备中' }}</span><span v-if="runningTask.mode === 'transcript' && runningTask.transcriptProgress?.generatedCharacters">已生成 {{ runningTask.transcriptProgress.generatedCharacters }} 字</span><span v-else>{{ runningTask.owner }}</span></div><div class="download-progress-track" role="progressbar" aria-label="下载处理中"><span v-if="typeof runningTask.progress === 'number'" :style="{ width: `${runningTask.progress}%` }"></span><i v-else></i></div><span v-if="typeof runningTask.progress === 'number'" class="real-progress-label">{{ runningTask.progress }}%</span></div><button class="cancel-button" :disabled="runningTask.phase === '正在取消'" @click="requestCancelRunning(runningTask)"><X :size="14" />{{ runningTask.phase === '正在取消' ? '正在取消' : '取消' }}</button></div>
-              <div v-for="(task, index) in waitingTasks" :key="task.id" class="download-row waiting-row"><div class="queue-index">{{ String(index + 1).padStart(2, '0') }}</div><div class="task-type-icon" :class="task.mode"><component :is="taskIcon[task.mode]" :size="18" /></div><div class="download-task-main"><div class="download-task-title"><strong>{{ task.title }}</strong><span class="download-mode">{{ taskNames[task.mode] }}</span></div><div class="download-phase"><span class="task-status waiting">等待中</span><span>{{ task.owner }}</span></div></div><button class="remove-button" @click="removeWaitingTask(task)"><Trash2 :size="14" />移除</button></div>
+              <div v-if="runningTask" class="download-row running-row"><div class="task-type-icon" :class="runningTask.mode"><component :is="taskIcon[runningTask.mode]" :size="19" /></div><div class="download-task-main"><div class="download-task-title"><strong>{{ runningTask.title }}</strong><span class="download-mode">{{ taskDisplayName(runningTask) }}</span></div><div class="download-phase"><span class="task-status running">{{ runningTask.phase || '准备中' }}</span><span v-if="runningTask.mode === 'transcript' && runningTask.transcriptProgress?.generatedCharacters">已生成 {{ runningTask.transcriptProgress.generatedCharacters }} 字</span><span v-else>{{ runningTask.source?.type === 'local' ? '本地音频' : runningTask.owner }}</span></div><div class="download-progress-track" role="progressbar" aria-label="下载处理中"><span v-if="typeof runningTask.progress === 'number'" :style="{ width: `${runningTask.progress}%` }"></span><i v-else></i></div><span v-if="typeof runningTask.progress === 'number'" class="real-progress-label">{{ runningTask.progress }}%</span></div><button class="cancel-button" :disabled="runningTask.phase === '正在取消'" @click="requestCancelRunning(runningTask)"><X :size="14" />{{ runningTask.phase === '正在取消' ? '正在取消' : '取消' }}</button></div>
+              <div v-for="(task, index) in waitingTasks" :key="task.id" class="download-row waiting-row"><div class="queue-index">{{ String(index + 1).padStart(2, '0') }}</div><div class="task-type-icon" :class="task.mode"><component :is="taskIcon[task.mode]" :size="18" /></div><div class="download-task-main"><div class="download-task-title"><strong>{{ task.title }}</strong><span class="download-mode">{{ taskDisplayName(task) }}</span></div><div class="download-phase"><span class="task-status waiting">等待中</span><span>{{ task.source?.type === 'local' ? '本地音频' : task.owner }}</span></div></div><button class="remove-button" @click="removeWaitingTask(task)"><Trash2 :size="14" />移除</button></div>
               <div v-if="!activeTasks.length" class="empty-state task-empty"><div class="empty-state-icon"><ListChecks :size="19" /></div><strong>当前没有待处理任务</strong><span>新建下载或转写任务后会在这里显示。</span></div>
             </div>
             <div v-else class="download-list history-download-list">
-              <div v-for="task in historyTasks" :key="task.id" class="download-row history-row" :class="{ 'transcript-history-row': task.status === 'completed' && task.mode === 'transcript' }" @click="openTranscriptTask(task)"><div class="task-type-icon" :class="task.mode"><component :is="taskIcon[task.mode]" :size="18" /></div><div class="download-task-main"><div class="download-task-title"><strong>{{ task.title }}</strong><span class="download-mode">{{ taskNames[task.mode] }}</span><span class="task-status" :class="task.status">{{ task.status === 'completed' ? '已完成' : task.status === 'failed' ? '失败' : '已取消' }}</span></div><div v-if="task.status === 'completed'" class="history-task-meta"><span>{{ formatFileSize(task.fileSize) }}</span><i></i><span>{{ formatTaskDate(task.completedAt) }}</span><template v-if="Number.isFinite(task.durationMs) && task.durationMs >= 0"><i></i><span>耗时 {{ formatTaskDuration(task.durationMs) }}</span></template></div><div v-else-if="task.status === 'failed'" class="history-task-error">{{ task.error || '下载失败，可重试。' }}</div><div v-else class="history-task-meta"><span>已取消</span><i></i><span>{{ formatTaskDate(task.completedAt) }}</span></div></div><button v-if="task.status === 'completed'" class="outline-button task-open-button" @click.stop="openTaskLocation(task)"><FolderOpen :size="14" />打开位置</button><button v-if="task.status === 'failed' || (task.status === 'cancelled' && task.mode === 'transcript')" class="retry-button" @click.stop="retryTask(task)"><RefreshCw :size="14" />{{ task.status === 'cancelled' ? '继续转写' : '重试' }}</button></div>
+              <div v-for="task in historyTasks" :key="task.id" class="download-row history-row" :class="{ 'transcript-history-row': task.status === 'completed' && task.mode === 'transcript' }" @click="openTranscriptTask(task)"><div class="task-type-icon" :class="task.mode"><component :is="taskIcon[task.mode]" :size="18" /></div><div class="download-task-main"><div class="download-task-title"><strong>{{ task.title }}</strong><span class="download-mode">{{ taskDisplayName(task) }}</span><span class="task-status" :class="task.status">{{ task.status === 'completed' ? '已完成' : task.status === 'failed' ? '失败' : '已取消' }}</span></div><div v-if="task.status === 'completed'" class="history-task-meta"><span>{{ formatFileSize(task.fileSize) }}</span><i></i><span>{{ formatTaskDate(task.completedAt) }}</span><template v-if="Number.isFinite(task.durationMs) && task.durationMs >= 0"><i></i><span>耗时 {{ formatTaskDuration(task.durationMs) }}</span></template></div><div v-else-if="task.status === 'failed'" class="history-task-error">{{ task.error || '下载失败，可重试。' }}</div><div v-else class="history-task-meta"><span>已取消</span><i></i><span>{{ formatTaskDate(task.completedAt) }}</span></div></div><button v-if="task.status === 'completed'" class="outline-button task-open-button" @click.stop="openTaskLocation(task)"><FolderOpen :size="14" />打开位置</button><button v-if="task.status === 'failed' || (task.status === 'cancelled' && task.mode === 'transcript')" class="retry-button" @click.stop="retryTask(task)"><RefreshCw :size="14" />{{ task.status === 'cancelled' ? '继续转写' : '重试' }}</button></div>
               <div v-if="!historyTasks.length" class="empty-state task-empty"><div class="empty-state-icon"><History :size="19" /></div><strong>暂无已完成的记录</strong><span>完成或失败的下载会保留在这里。</span></div>
             </div>
           </div>
@@ -777,7 +912,7 @@ onUnmounted(() => { clearInterval(taskPollTimer); clearInterval(qrPollTimer); cl
 
         <section v-else-if="page === 'transcripts'" class="page-content transcripts-page">
           <div class="page-heading"><div><div class="eyebrow">TRANSCRIPT LIBRARY</div><h1>文字稿</h1><p>查看、复制或导出已完成的文字稿。</p></div><div class="transcript-total"><BookOpenText :size="16" /><strong>{{ transcripts.length }}</strong> 篇文字稿</div></div>
-          <div v-if="transcripts.length" class="transcript-workspace panel"><aside class="transcript-sidebar"><div class="transcript-sidebar-head"><div><strong>全部文字稿</strong><span>{{ transcripts.length }} 篇</span></div><button class="icon-button" title="搜索文字稿"><Search :size="16" /></button></div><div class="transcript-search"><Search :size="15" /><input v-model="transcriptQuery" placeholder="搜索标题或 UP 主" /></div><div class="transcript-items"><button v-for="item in visibleTranscripts" :key="item.id" class="transcript-item" :class="{ active: activeTranscriptId === item.id }" @click="activeTranscriptId = item.id"><span class="transcript-item-icon"><FileText :size="16" /></span><span class="transcript-item-copy"><strong>{{ item.title }}</strong><small>{{ item.creator }} <i>·</i> {{ formatTranscriptDate(item.completedAt) }}</small></span><ChevronRight :size="15" class="transcript-item-arrow" /></button><div v-if="!visibleTranscripts.length" class="empty-state transcript-no-results"><div class="empty-state-icon"><Search :size="15" /></div><strong>没有找到匹配的文字稿</strong><span>试试其他标题或 UP 主名称。</span></div></div><div class="transcript-sidebar-foot"><span class="storage-icon"><HardDriveDownload :size="15" /></span><span>文字稿保存位置</span><button @click="page = 'settings'">查看设置<ChevronRight :size="13" /></button></div></aside>
+          <div v-if="transcripts.length" class="transcript-workspace panel"><aside class="transcript-sidebar"><div class="transcript-sidebar-head"><div><strong>全部文字稿</strong><span>{{ transcripts.length }} 篇</span></div><button class="icon-button" title="搜索文字稿"><Search :size="16" /></button></div><div class="transcript-search"><Search :size="15" /><input v-model="transcriptQuery" placeholder="搜索标题或 UP 主" /></div><div class="transcript-items"><button v-for="item in visibleTranscripts" :key="item.id" class="transcript-item" :class="{ active: activeTranscriptId === item.id }" @click="activeTranscriptId = item.id"><span class="transcript-item-icon"><FileText :size="16" /></span><span class="transcript-item-copy"><strong>{{ item.title }}</strong><small><span class="transcript-source-tag">{{ item.sourceType === 'local' ? '本地' : 'B站' }}</span> {{ item.sourceType === 'local' ? '本地音频' : item.creator }} <i>·</i> {{ formatTranscriptDate(item.completedAt) }}</small></span><ChevronRight :size="15" class="transcript-item-arrow" /></button><div v-if="!visibleTranscripts.length" class="empty-state transcript-no-results"><div class="empty-state-icon"><Search :size="15" /></div><strong>没有找到匹配的文字稿</strong><span>试试其他标题或 UP 主名称。</span></div></div><div class="transcript-sidebar-foot"><span class="storage-icon"><HardDriveDownload :size="15" /></span><span>文字稿保存位置</span><button @click="page = 'settings'">查看设置<ChevronRight :size="13" /></button></div></aside>
             <article class="transcript-reader"><div class="reader-top"><div class="reader-breadcrumb"><FileText :size="15" /><span>文字稿</span><ChevronRight :size="13" /><strong>{{ activeTranscript.title }}</strong></div><div class="reader-actions"><button class="outline-button" @click="copyTranscript"><Copy :size="15" />复制全文</button><button class="outline-button" @click="openTaskLocation({ id: activeTranscript.id })"><FolderOpen :size="15" />打开位置</button><button class="primary-button export-button" @click="exportTranscript"><Download :size="15" />导出 TXT</button></div></div><div class="reader-document"><div class="document-type"><span>课程转写</span><span class="document-dot"></span><span>完整文字稿</span></div><h2>{{ activeTranscript.title }}</h2><div class="document-meta"><span><UserRound :size="14" />{{ activeTranscript.creator }}</span><span><CalendarIcon />{{ formatTranscriptDate(activeTranscript.completedAt) }}</span><span><Clock3 :size="14" />{{ activeTranscript.wordCount }} 字</span></div><div class="document-rule"></div><div class="transcript-body"><p v-for="(paragraph, index) in activeTranscript.text.split('\n\n')" :key="index">{{ paragraph }}</p></div><div class="document-end"><span></span><small>正文结束</small><span></span></div></div><div class="reader-footer"><span><ShieldCheck :size="14" />保留讲师原话 · 未做总结和改写</span><span>共 {{ activeTranscript.wordCount }} 字</span></div></article></div>
           <div v-else class="empty-state panel transcript-page-empty"><div class="empty-state-icon"><BookOpenText :size="19" /></div><strong>还没有文字稿</strong><span>完成一次转写后，文字稿会显示在这里。</span></div>
         </section>
@@ -795,7 +930,7 @@ onUnmounted(() => { clearInterval(taskPollTimer); clearInterval(qrPollTimer); cl
       </div>
     </main>
 
-    <div v-if="page === 'new' && parseState === 'success' && resultType === 'creator' && selectedCount" class="batch-bar"><div class="batch-selection"><div class="batch-selected-icon"><Check :size="16" /></div><div><strong>已选择 {{ selectedCount }} 个视频</strong><small v-if="creatorSearch.trim()">包含当前筛选外的选择</small><button @click="clearAll">清空选择</button></div></div><span class="batch-divider"></span><div class="batch-action-select"><span>添加为</span><button v-for="mode in modeOptions" :key="mode.id" :class="{ active: batchAction === mode.id, disabled: mode.disabled }" :disabled="mode.disabled" @click="batchAction = mode.id"><component :is="mode.icon" :size="15" />{{ mode.label }}<span v-if="mode.disabled" class="mode-disabled-label">下一阶段</span><span v-else class="radio-dot"><i></i></span></button></div><button class="primary-button batch-create" @click="createBatchTasks"><Plus :size="16" />创建 {{ selectedCount }} 个任务</button></div>
+    <div v-if="page === 'new' && newTaskSource === 'bilibili' && parseState === 'success' && resultType === 'creator' && selectedCount" class="batch-bar"><div class="batch-selection"><div class="batch-selected-icon"><Check :size="16" /></div><div><strong>已选择 {{ selectedCount }} 个视频</strong><small v-if="creatorSearch.trim()">包含当前筛选外的选择</small><button @click="clearAll">清空选择</button></div></div><span class="batch-divider"></span><div class="batch-action-select"><span>添加为</span><button v-for="mode in modeOptions" :key="mode.id" :class="{ active: batchAction === mode.id, disabled: mode.disabled }" :disabled="mode.disabled" @click="batchAction = mode.id"><component :is="mode.icon" :size="15" />{{ mode.label }}<span v-if="mode.disabled" class="mode-disabled-label">下一阶段</span><span v-else class="radio-dot"><i></i></span></button></div><button class="primary-button batch-create" @click="createBatchTasks"><Plus :size="16" />创建 {{ selectedCount }} 个任务</button></div>
 
     <div v-if="confirmationDialog" class="modal-backdrop" @click.self="confirmation = null"><div class="confirm-modal panel" role="dialog" aria-modal="true" :aria-label="confirmationTitle"><button class="icon-button modal-close" aria-label="关闭" @click="confirmation = null"><X :size="18" /></button><div class="confirm-modal-icon"><CircleHelp :size="20" /></div><h2>{{ confirmationTitle }}</h2><p>{{ confirmationMessage }}</p><div class="confirm-actions"><button class="outline-button" @click="confirmation = null">返回</button><button class="primary-button confirm-danger" @click="confirmAction">{{ confirmation?.type === 'clear-history' ? '清除历史' : '确认取消' }}</button></div></div></div>
     <div v-if="qrDialog" class="modal-backdrop" @click.self="closeQrDialog"><div class="login-modal panel" role="dialog" aria-modal="true" aria-label="扫码登录 B 站"><button class="icon-button modal-close" aria-label="关闭" @click="closeQrDialog"><X :size="18" /></button><div class="login-modal-icon"><ScanLine :size="22" /></div><h2>扫码登录 B 站</h2><p>打开哔哩哔哩 App，扫描二维码完成登录</p><div class="real-qr" :class="{ 'qr-is-loading': qrStarting }"><img v-if="qrImage" :src="qrImage" alt="B 站登录二维码" /><div v-else class="qr-placeholder"><LoaderCircle v-if="qrStarting" class="spin" :size="24" /><ScanLine v-else :size="24" /></div></div><div class="qr-note" :class="`qr-${qrStatus}`"><span class="live-dot"></span>{{ qrStatusLabel }}</div><p v-if="qrMessage" class="qr-error-message">{{ qrMessage }}</p><button v-if="['expired', 'failed'].includes(qrStatus)" class="primary-button simulate-login" :disabled="qrStarting" @click="startQrLogin"><RefreshCw :size="16" />刷新二维码</button><small class="modal-disclaimer">登录信息仅保存在本机，不会发送给 BiliScribe 服务之外的站点。</small></div></div>
