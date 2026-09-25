@@ -188,6 +188,14 @@ function formatFileSize(bytes) {
   return `${(size / 1024 ** 3).toFixed(2)} GB`
 }
 
+function formatTaskDuration(durationMs) {
+  if (!Number.isFinite(durationMs) || durationMs < 0) return ''
+  const seconds = Math.floor(durationMs / 1000)
+  if (seconds < 60) return `${Math.max(1, seconds)}秒`
+  if (seconds < 3600) return `${Math.floor(seconds / 60)}分${seconds % 60}秒`
+  return `${Math.floor(seconds / 3600)}小时${String(Math.floor((seconds % 3600) / 60)).padStart(2, '0')}分`
+}
+
 async function refreshTasks() {
   try {
     const response = await fetch('/api/tasks')
@@ -402,6 +410,19 @@ function markSettingsSaved() {
   settingsSaved.value = true
   clearTimeout(settingsSavedTimer)
   settingsSavedTimer = setTimeout(() => { settingsSaved.value = false }, 1800)
+}
+
+async function openTranscriptTask(task) {
+  if (task.status !== 'completed' || task.mode !== 'transcript') return
+  const transcriptId = task.transcriptId || task.id
+  await refreshTranscriptLibrary()
+  if (!transcripts.value.some((item) => item.id === transcriptId)) {
+    notify('找不到此任务对应的文字稿。')
+    return
+  }
+  transcriptQuery.value = ''
+  activeTranscriptId.value = transcriptId
+  page.value = 'transcripts'
 }
 
 function saveSettings(options = {}) {
@@ -748,7 +769,7 @@ onUnmounted(() => { clearInterval(taskPollTimer); clearInterval(qrPollTimer); cl
               <div v-if="!activeTasks.length" class="empty-state task-empty"><div class="empty-state-icon"><ListChecks :size="19" /></div><strong>当前没有待处理任务</strong><span>新建下载或转写任务后会在这里显示。</span></div>
             </div>
             <div v-else class="download-list history-download-list">
-              <div v-for="task in historyTasks" :key="task.id" class="download-row history-row"><div class="task-type-icon" :class="task.mode"><component :is="taskIcon[task.mode]" :size="18" /></div><div class="download-task-main"><div class="download-task-title"><strong>{{ task.title }}</strong><span class="download-mode">{{ taskNames[task.mode] }}</span><span class="task-status" :class="task.status">{{ task.status === 'completed' ? '已完成' : task.status === 'failed' ? '失败' : '已取消' }}</span></div><div v-if="task.status === 'completed'" class="history-task-meta"><span>{{ formatFileSize(task.fileSize) }}</span><i></i><span>{{ formatTaskDate(task.completedAt) }}</span></div><div v-else-if="task.status === 'failed'" class="history-task-error">{{ task.error || '下载失败，可重试。' }}</div><div v-else class="history-task-meta"><span>已取消</span><i></i><span>{{ formatTaskDate(task.completedAt) }}</span></div></div><button v-if="task.status === 'completed'" class="outline-button task-open-button" @click="openTaskLocation(task)"><FolderOpen :size="14" />打开位置</button><button v-if="task.status === 'failed' || (task.status === 'cancelled' && task.mode === 'transcript')" class="retry-button" @click="retryTask(task)"><RefreshCw :size="14" />{{ task.status === 'cancelled' ? '继续转写' : '重试' }}</button></div>
+              <div v-for="task in historyTasks" :key="task.id" class="download-row history-row" :class="{ 'transcript-history-row': task.status === 'completed' && task.mode === 'transcript' }" @click="openTranscriptTask(task)"><div class="task-type-icon" :class="task.mode"><component :is="taskIcon[task.mode]" :size="18" /></div><div class="download-task-main"><div class="download-task-title"><strong>{{ task.title }}</strong><span class="download-mode">{{ taskNames[task.mode] }}</span><span class="task-status" :class="task.status">{{ task.status === 'completed' ? '已完成' : task.status === 'failed' ? '失败' : '已取消' }}</span></div><div v-if="task.status === 'completed'" class="history-task-meta"><span>{{ formatFileSize(task.fileSize) }}</span><i></i><span>{{ formatTaskDate(task.completedAt) }}</span><template v-if="Number.isFinite(task.durationMs) && task.durationMs >= 0"><i></i><span>耗时 {{ formatTaskDuration(task.durationMs) }}</span></template></div><div v-else-if="task.status === 'failed'" class="history-task-error">{{ task.error || '下载失败，可重试。' }}</div><div v-else class="history-task-meta"><span>已取消</span><i></i><span>{{ formatTaskDate(task.completedAt) }}</span></div></div><button v-if="task.status === 'completed'" class="outline-button task-open-button" @click.stop="openTaskLocation(task)"><FolderOpen :size="14" />打开位置</button><button v-if="task.status === 'failed' || (task.status === 'cancelled' && task.mode === 'transcript')" class="retry-button" @click.stop="retryTask(task)"><RefreshCw :size="14" />{{ task.status === 'cancelled' ? '继续转写' : '重试' }}</button></div>
               <div v-if="!historyTasks.length" class="empty-state task-empty"><div class="empty-state-icon"><History :size="19" /></div><strong>暂无已完成的记录</strong><span>完成或失败的下载会保留在这里。</span></div>
             </div>
           </div>

@@ -241,7 +241,7 @@ h1 { margin: 0; color: #1d2b3c; font-size: 23px; font-weight: 700; letter-spacin
 .single-meta span { display: flex; align-items: center; gap: 4px; }
 .single-divider { width: 100%; height: 1px; margin: 16px 0 12px; background: #edf0f3; }
 .mode-label { margin-bottom: 8px; color: #7e8b9a; font-size: 9px; }
-.mode-options { display: flex; flex-wrap: wrap; gap: 7px; }
+.mode-options { display: flex; flex-wrap: wrap; gap: 7px; margin-bottom: 18px; }
 .mode-option { display: flex; height: 34px; align-items: center; gap: 7px; padding: 0 9px; border: 1px solid #e7ebef; border-radius: 6px; background: white; color: #778597; cursor: pointer; font-size: 9px; transition: .16s; }
 .mode-option:hover { border-color: #cfe1ef; }
 .mode-option.active { border-color: #b9dbf4; background: #f2f9ff; color: #087ad9; }
@@ -249,7 +249,7 @@ h1 { margin: 0; color: #1d2b3c; font-size: 23px; font-weight: 700; letter-spacin
 .mode-option.active .mode-radio { border-color: #087ad9; }
 .mode-radio i { width: 6px; height: 6px; border-radius: 50%; background: transparent; }
 .mode-option.active .mode-radio i { background: #087ad9; }
-.single-action { height: 34px; margin-top: auto; }
+.single-action { height: 34px; margin-top: 0; }
 
 .tasks-page .page-heading { align-items: center; }
 .tasks-page .page-heading > .outline-button { margin-top: 14px; }
@@ -580,7 +580,7 @@ h1 { color: #1f2e42; font-size: 26px; letter-spacing: -.45px; }
 .mode-option { height: 40px; font-size: 14px; }
 .mode-option.disabled { cursor: not-allowed; opacity: .58; }
 .mode-disabled-label { margin-left: auto; color: #7c8998; font-size: 11px; white-space: nowrap; }
-.single-action { height: 42px; font-size: 15px; }
+.single-action { height: 42px; margin-top: 0; font-size: 15px; }
 .primary-button, .outline-button { height: 40px; font-size: 14px; }
 .parse-button, .single-action, .batch-create { font-size: 15px; }
 .batch-bar { min-height: 76px; }
@@ -882,6 +882,8 @@ h1 { color: #1f2e42; font-size: 26px; letter-spacing: -.45px; }
 .download-row .cancel-button, .download-row .remove-button, .download-row .retry-button, .download-row .task-open-button { height: 35px; padding: 0 11px; font-size: 13px; }
 .queue-index { width: 23px; color: #75869a; font-size: 12px; }
 .history-row { min-height: 75px; }
+.transcript-history-row { cursor: pointer; }
+.transcript-history-row:hover { background: #f7fafc; }
 .history-task-meta { display: flex; align-items: center; gap: 10px; color: #64758a; font-size: 13px; }
 .history-task-meta i { height: 12px; }
 .history-task-error { overflow: hidden; max-width: 780px; color: #a95450; font-size: 13px; text-overflow: ellipsis; white-space: nowrap; }

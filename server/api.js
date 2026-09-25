@@ -101,7 +101,11 @@ try {
       task.status = 'failed'
       task.phase = '后台关闭时任务中断'
       task.error = 'BiliScribe 关闭时任务未完成，请重试。'
-      task.completedAt = new Date().toISOString()
+      const endedAt = new Date().toISOString()
+      task.endedAt = endedAt
+      const startedAtMs = Date.parse(task.startedAt || '')
+      task.durationMs = Number.isFinite(startedAtMs) ? Math.max(0, Date.parse(endedAt) - startedAtMs) : null
+      task.completedAt = endedAt
     }
     downloadTasks.set(task.id, task)
   }
@@ -795,6 +799,22 @@ function getDownloadTasks() {
   return [...downloadTasks.values()].sort((left, right) => left.createdAt.localeCompare(right.createdAt))
 }
 
+function beginTaskExecution(task) {
+  const startedAtMs = Date.now()
+  task.startedAt = new Date(startedAtMs).toISOString()
+  task.endedAt = null
+  task.durationMs = null
+  return startedAtMs
+}
+
+function endTaskExecution(task, startedAtMs) {
+  if (!['completed', 'failed', 'cancelled'].includes(task.status)) return
+  const endedAtMs = Date.now()
+  task.endedAt = new Date(endedAtMs).toISOString()
+  task.durationMs = Number.isFinite(startedAtMs) ? Math.max(0, endedAtMs - startedAtMs) : null
+  task.completedAt = task.endedAt
+}
+
 function findFFmpeg() {
   const configuredPath = process.env.FFMPEG_PATH
   if (configuredPath && fs.existsSync(configuredPath)) return configuredPath
@@ -975,9 +995,9 @@ function killDownloadTree(child) {
 }
 
 async function runDownloadTask(task) {
-  const startedAt = Date.now()
   let child = null
   task.status = 'running'
+  const startedAt = beginTaskExecution(task)
   task.phase = '准备中'
   task.progress = null
   task.error = ''
@@ -1108,6 +1128,7 @@ async function runDownloadTask(task) {
       log('error', 'Download task failed', { taskId: task.id, bvid: task.bvid, mode: task.mode, code: error.code || 'download_error', reason: task.error, outputDirectory: task.outputDirectory, stack: error.stack, durationMs: Date.now() - startedAt })
     }
   } finally {
+    endTaskExecution(task, startedAt)
     if (activeDownloadChild && activeDownloadChild.exitCode !== null) {
       childProcesses.delete(activeDownloadChild)
       activeDownloadChild = null
@@ -1563,7 +1584,7 @@ async function splitTranscriptSegment(task, ffmpegPath, workDirectory, segment) 
 }
 
 async function runTranscriptTask(task) {
-  const startedAt = Date.now()
+  let startedAt
   const ownedWorkDirectory = path.join(transcriptWorkDirectory, task.id)
   const sourceDownloadDirectory = path.join(ownedWorkDirectory, 'source-audio')
   const segmentDirectory = path.join(ownedWorkDirectory, 'audio-segments')
@@ -1571,6 +1592,7 @@ async function runTranscriptTask(task) {
   let checkpoint = null
   let segments = []
   task.status = 'running'
+  startedAt = beginTaskExecution(task)
   task.phase = '准备音频'
   task.error = ''
   task.completedAt = null
@@ -1789,6 +1811,7 @@ async function runTranscriptTask(task) {
     const library = readTranscriptLibrary().filter((item) => item.id !== task.id)
     library.push(entry)
     writeTranscriptLibrary(library)
+    task.transcriptId = entry.id
     task.status = 'completed'
     task.phase = '已完成'
     task.outputPath = outputPath
@@ -1815,6 +1838,7 @@ async function runTranscriptTask(task) {
       log('error', 'Transcript task failed', { taskId: task.id, bvid: task.bvid, code: error.code || 'transcript_error', reason: task.error, durationMs: Date.now() - startedAt })
     }
   } finally {
+    endTaskExecution(task, startedAt)
     stopTranscriptWakeLock()
     activeTaskAbortController = null
     task.cancelRequested = false
@@ -1859,7 +1883,8 @@ async function createDownloadTask(request, response) {
     creatorName: '', groupName: '',
     mode: body.mode, status: 'waiting', phase: '等待中', progress: null,
     outputPath: '', outputDirectory: '', outputFiles: [], fileSize: 0,
-    error: '', createdAt: new Date().toISOString(), completedAt: null, attempt: 0,
+    error: '', createdAt: new Date().toISOString(), completedAt: null,
+    startedAt: null, endedAt: null, durationMs: null, attempt: 0,
   }
   downloadTasks.set(task.id, task)
   saveLocalState()
@@ -1894,7 +1919,8 @@ async function createBatchDownloadTasks(request, response) {
   const tasks = unique.map((video) => ({
     id: randomUUID(), ...video, mode: body.mode, status: 'waiting', phase: '等待中', progress: null,
     outputPath: '', outputDirectory: '', outputFiles: [], fileSize: 0, error: '',
-    createdAt: new Date().toISOString(), completedAt: null, attempt: 0,
+    createdAt: new Date().toISOString(), completedAt: null,
+    startedAt: null, endedAt: null, durationMs: null, attempt: 0,
   }))
   for (const task of tasks) downloadTasks.set(task.id, task)
   saveLocalState()
@@ -2107,6 +2133,9 @@ async function handleTaskAction(request, response, method, pathname) {
     task.phase = '等待中'
     task.error = ''
     task.completedAt = null
+    task.startedAt = null
+    task.endedAt = null
+    task.durationMs = null
     task.progress = null
     task.cancelRequested = false
     saveLocalState()
