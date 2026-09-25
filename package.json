@@ -4,7 +4,9 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
-    "dev": "vite",
+    "dev": "node server/dev.js",
+    "dev:ui": "vite --host 127.0.0.1",
+    "dev:api": "node server/api.js",
     "build": "vite build",
     "preview": "vite preview"
   },

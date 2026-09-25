@@ -28,11 +28,12 @@ function notify(message) {
   toastTimer = setTimeout(() => (toast.value = ''), 2600)
 }
 
-const url = ref('https://space.bilibili.com/349327328')
-const resultType = ref('creator')
+const url = ref('https://www.bilibili.com/video/BV1eQNL6JEV2/')
+const resultType = ref('video')
 const isParsing = ref(false)
-const parseState = ref('success')
+const parseState = ref('idle')
 const parseErrorKind = ref('')
+const parseErrorMessage = ref('')
 const currentPage = ref(1)
 const creatorSearch = ref('')
 const expandedAlbums = ref(new Set(['album-1']))
@@ -95,63 +96,57 @@ const selectedCount = computed(() => selectedVideoIds.value.size)
 const pageAllSelected = computed(() => pageVideos.value.length > 0 && pageVideos.value.every((video) => selectedVideoIds.value.has(video.id)))
 const allSelected = computed(() => creatorResultVideos.value.length > 0 && creatorResultVideos.value.every((video) => selectedVideoIds.value.has(video.id)))
 watch(creatorSearch, () => { currentPage.value = 1 })
-watch(url, () => { if (!isParsing.value) parseState.value = 'idle'; parseErrorKind.value = '' })
+watch(url, () => { if (!isParsing.value) parseState.value = 'idle'; parseErrorKind.value = ''; parseErrorMessage.value = '' })
 
 const creator = { name: '山间命理课', id: '山间命理课', avatar: '山', description: '把复杂的命理知识讲清楚 · 课程持续更新', videos: 16, collections: 5, followers: '8.6万' }
-const singleVideo = {
-  title: '八字入门第一课：四柱、干支和五行基础概念讲解',
-  owner: '山间命理课', duration: '18:42', date: '2026-09-18', views: '2.6万', art: 'ink',
-}
+const singleVideo = ref({ title: '', bvid: '', owner: '', duration: '', date: '', views: null, cover: '', url: '' })
 
 function setDemoLink(kind) {
   const samples = {
-    video: 'https://www.bilibili.com/video/BV1xx411c7mD',
+    video: 'https://www.bilibili.com/video/BV1eQNL6JEV2/',
     creator: 'https://space.bilibili.com/349327328',
-    failed: 'https://www.bilibili.com/video/BV1demoFAIL',
+    failed: 'https://www.bilibili.com/video/BV1demoFAIL0/',
     invalid: 'https://example.com/video/BV1xx411c7mD',
   }
   url.value = samples[kind]
   parseLink()
 }
-function parseLink() {
+async function parseLink() {
   const value = url.value.trim()
   selectedVideoIds.value = new Set()
   parseErrorKind.value = ''
+  parseErrorMessage.value = ''
   if (!value) {
     isParsing.value = false
     parseState.value = 'empty'
     return
   }
-  let parsed
-  try { parsed = new URL(/^https?:\/\//i.test(value) ? value : `https://${value}`) } catch {
-    parseState.value = 'invalid'
-    return
-  }
-  const host = parsed.hostname.toLowerCase()
-  const isBilibili = host === 'bilibili.com' || host.endsWith('.bilibili.com') || host === 'b23.tv' || host.endsWith('.b23.tv')
-  const isVideo = host === 'b23.tv' || host.endsWith('.b23.tv') || /\/video\/BV[a-zA-Z0-9]+/i.test(parsed.pathname)
-  const isCreator = host === 'space.bilibili.com' && /^\/\d+\/?$/.test(parsed.pathname)
   parseState.value = 'loading'
   isParsing.value = true
-  setTimeout(() => {
-    isParsing.value = false
-    if (!isBilibili || (!isVideo && !isCreator)) {
-      parseState.value = 'invalid'
-      parseErrorKind.value = 'invalid'
-    } else if (/BV1demoFAIL/i.test(value)) {
-      parseState.value = 'failed'
-      parseErrorKind.value = 'failed'
-    } else if (isVideo) {
-      resultType.value = 'video'
-      parseState.value = 'success'
-      notify('已解析单个视频（演示数据）')
-    } else {
-      resultType.value = 'creator'
-      currentPage.value = 1
-      parseState.value = 'success'
-      notify('已解析 UP 主主页（演示数据）')
+  try {
+    const response = await fetch('/api/videos/parse', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url: value }),
+    })
+    const result = await response.json()
+    if (!response.ok) {
+      parseErrorKind.value = result.error?.code || 'parse_failed'
+      parseErrorMessage.value = result.error?.message || '视频解析失败，请稍后重试。'
+      parseState.value = ['invalid_url', 'unsupported_url', 'empty_url'].includes(parseErrorKind.value) ? 'invalid' : 'failed'
+      return
     }
-  }, 550)
+    singleVideo.value = result.video
+    resultType.value = 'video'
+    parseState.value = 'success'
+    notify('视频解析完成')
+  } catch {
+    parseErrorKind.value = 'backend_unavailable'
+    parseErrorMessage.value = '本地后台未连接。请使用 npm run dev 启动后台与页面。'
+    parseState.value = 'failed'
+  } finally {
+    isParsing.value = false
+  }
 }
 
 function toggleVideo(id) {
@@ -221,7 +216,7 @@ function createTasks() {
 }
 function addSingleTask() {
   const mode = batchAction.value || 'video'
-  tasks.value.push({ id: nextTaskId++, title: singleVideo.title, owner: creator.name, mode, status: 'waiting', progress: 0, size: '—' })
+  tasks.value.push({ id: nextTaskId++, title: singleVideo.value.title, owner: singleVideo.value.owner, mode, status: 'waiting', progress: 0, size: '—' })
   startNextTask()
   notify(`已加入${taskNames[mode]}任务`)
   page.value = 'tasks'
@@ -318,6 +313,13 @@ const transcriptPath = ref('D:\\BiliScribe\\文字稿')
 const savedDownloadPath = ref(downloadPath.value)
 const savedTranscriptPath = ref(transcriptPath.value)
 const settingsDirty = computed(() => apiKey.value !== savedApiKey.value || downloadPath.value !== savedDownloadPath.value || transcriptPath.value !== savedTranscriptPath.value)
+const backendStatus = ref('connecting')
+const bbdownAvailable = ref(null)
+const bbdownVersion = ref('')
+const logPath = ref('项目目录/logs/biliscribe.log')
+const logAvailable = ref(false)
+const logLineCount = ref(0)
+const logLoading = ref(false)
 function saveSettings() {
   savedApiKey.value = apiKey.value
   savedDownloadPath.value = downloadPath.value
@@ -336,7 +338,85 @@ function choosePath(which) {
   notify('目录选择为演示交互，未访问本机文件')
 }
 
-onMounted(() => { progressTimer = setInterval(advanceProgress, 900) })
+async function refreshLogPreview() {
+  logLoading.value = true
+  try {
+    const response = await fetch('/api/logs/recent')
+    if (!response.ok) throw new Error('日志读取失败')
+    const result = await response.json()
+    backendStatus.value = 'online'
+    logPath.value = result.logPath || logPath.value
+    logAvailable.value = result.available
+    logLineCount.value = result.lines || 0
+    return result
+  } catch {
+    backendStatus.value = 'offline'
+    logAvailable.value = false
+    logLineCount.value = 0
+    return null
+  } finally {
+    logLoading.value = false
+  }
+}
+
+async function refreshBackendStatus() {
+  try {
+    const response = await fetch('/api/health')
+    if (!response.ok) throw new Error('本地后台不可用')
+    const result = await response.json()
+    backendStatus.value = 'online'
+    bbdownAvailable.value = result.bbdownAvailable
+    bbdownVersion.value = result.bbdownVersion || ''
+    logPath.value = result.logPath || logPath.value
+    await refreshLogPreview()
+  } catch {
+    backendStatus.value = 'offline'
+    bbdownAvailable.value = false
+    bbdownVersion.value = ''
+    logAvailable.value = false
+  }
+}
+
+async function copyRecentLogs() {
+  const result = await refreshLogPreview()
+  if (!result?.available) { notify(backendStatus.value === 'online' ? '当前没有可复制的日志' : '本地后台未运行，无法读取日志'); return }
+  try {
+    await navigator.clipboard.writeText(result.content)
+    notify(`已复制最近 ${result.lines} 行日志`)
+  } catch {
+    notify('浏览器未授权剪贴板，请检查剪贴板权限后重试')
+  }
+}
+
+async function exportLogs() {
+  try {
+    const response = await fetch('/api/logs/export')
+    if (response.status === 404) { notify('当前没有可导出的日志'); return }
+    if (!response.ok) throw new Error('日志导出失败')
+    const fileUrl = URL.createObjectURL(await response.blob())
+    const link = document.createElement('a')
+    link.href = fileUrl
+    link.download = 'biliscribe.log'
+    link.click()
+    URL.revokeObjectURL(fileUrl)
+    notify('完整日志已导出')
+  } catch {
+    notify('本地后台未运行，无法导出日志')
+  }
+}
+
+async function openLogDirectory() {
+  try {
+    const response = await fetch('/api/logs/open', { method: 'POST' })
+    const result = await response.json()
+    if (!response.ok) throw new Error(result.error?.message || '无法打开日志目录')
+    notify('已打开日志目录')
+  } catch {
+    notify(backendStatus.value === 'online' ? '打开日志目录失败' : '本地后台未运行，无法打开日志目录')
+  }
+}
+
+onMounted(() => { progressTimer = setInterval(advanceProgress, 900); refreshBackendStatus() })
 onUnmounted(() => { clearInterval(progressTimer); clearTimeout(toastTimer) })
 </script>
 
@@ -382,12 +462,12 @@ onUnmounted(() => { clearInterval(progressTimer); clearTimeout(toastTimer) })
           </div>
 
           <div class="link-panel panel">
-            <div class="link-panel-title"><div class="step-icon"><Link2 :size="18" /></div><div><strong>添加 B 站链接</strong><span>支持单个视频，也支持 UP 主主页</span></div><span class="supported-tag">Bilibili</span></div>
-            <div class="link-entry"><div class="url-input-wrap"><Link2 :size="17" /><input v-model="url" aria-label="B站视频或UP主链接" placeholder="粘贴 B 站视频链接或 UP 主主页链接" @keydown.enter="parseLink" /><button v-if="url" class="input-clear" aria-label="清空链接" @click="url = ''"><X :size="15" /></button></div><button class="primary-button parse-button" :disabled="isParsing" @click="parseLink"><LoaderCircle v-if="isParsing" class="spin" :size="16" /><Search v-else :size="16" />{{ isParsing ? '解析中' : '解析链接' }}</button></div>
-            <div class="demo-hints"><span class="hint-label">试试演示链接</span><button @click="setDemoLink('video')">单个视频</button><i></i><button @click="setDemoLink('creator')">UP 主主页</button><i></i><button @click="setDemoLink('failed')">模拟失败</button><i></i><button @click="setDemoLink('invalid')">无效链接</button><span class="hint-footnote">解析结果为模拟数据</span></div>
+            <div class="link-panel-title"><div class="step-icon"><Link2 :size="18" /></div><div><strong>添加 B 站视频链接</strong><span>目前支持单个视频解析</span></div><span class="supported-tag">Bilibili</span></div>
+            <div class="link-entry"><div class="url-input-wrap"><Link2 :size="17" /><input v-model="url" aria-label="B站单视频链接" placeholder="粘贴 B 站单视频链接" @keydown.enter="parseLink" /><button v-if="url" class="input-clear" aria-label="清空链接" @click="url = ''"><X :size="15" /></button></div><button class="primary-button parse-button" :disabled="isParsing" @click="parseLink"><LoaderCircle v-if="isParsing" class="spin" :size="16" /><Search v-else :size="16" />{{ isParsing ? '解析中' : '解析链接' }}</button></div>
+            <div class="demo-hints"><span class="hint-label">快速测试</span><button @click="setDemoLink('video')">测试视频</button><i></i><button @click="setDemoLink('failed')">无效视频</button><i></i><button @click="setDemoLink('invalid')">非法链接</button><span class="hint-footnote">通过本地后台调用 BBDownNext</span></div>
           </div>
 
-          <div v-if="parseState !== 'success'" class="empty-state panel parse-state" :class="{ 'parse-loading': parseState === 'loading' }"><div class="empty-state-icon"><LoaderCircle v-if="parseState === 'loading'" class="spin" :size="19" /><XCircle v-else-if="parseState === 'invalid' || parseState === 'failed'" :size="19" /><Link2 v-else :size="19" /></div><strong>{{ parseState === 'loading' ? '正在解析链接' : parseState === 'empty' ? '请先粘贴 B 站链接' : parseState === 'idle' ? '等待解析' : parseErrorKind === 'failed' ? '模拟解析失败' : '链接无效' }}</strong><span>{{ parseState === 'loading' ? '正在准备演示解析结果，请稍候。' : parseState === 'empty' ? '粘贴视频链接或 UP 主主页链接，再点击“解析链接”。' : parseState === 'idle' ? '输入 B 站视频链接或 UP 主主页链接后开始解析。' : parseErrorKind === 'failed' ? '演示解析暂时失败，你可以重试或更换链接。' : '请检查链接格式，并使用 B 站视频或 UP 主主页链接。' }}</span><button v-if="parseState === 'failed'" class="outline-button empty-retry" @click="parseLink"><RefreshCw :size="14" />重试解析</button></div>
+          <div v-if="parseState !== 'success'" class="empty-state panel parse-state" :class="{ 'parse-loading': parseState === 'loading' }"><div class="empty-state-icon"><LoaderCircle v-if="parseState === 'loading'" class="spin" :size="19" /><XCircle v-else-if="parseState === 'invalid' || parseState === 'failed'" :size="19" /><Link2 v-else :size="19" /></div><strong>{{ parseState === 'loading' ? '正在解析视频' : parseState === 'empty' ? '请先粘贴 B 站视频链接' : parseState === 'idle' ? '等待解析' : parseErrorKind === 'backend_unavailable' ? '本地后台未连接' : parseErrorKind === 'bbdown_unavailable' ? 'BBDownNext 未就绪' : parseState === 'invalid' ? '链接无效或暂不支持' : '视频解析失败' }}</strong><span>{{ parseState === 'loading' ? '正在调用本地后台解析视频信息。' : parseState === 'empty' ? '粘贴 B 站单视频链接，再点击“解析链接”。' : parseState === 'idle' ? '输入 B 站单视频链接后开始解析。' : parseErrorMessage || '请检查链接后重试。' }}</span><button v-if="parseState === 'failed' && parseErrorKind !== 'backend_unavailable' && parseErrorKind !== 'bbdown_unavailable'" class="outline-button empty-retry" @click="parseLink"><RefreshCw :size="14" />重试解析</button></div>
 
           <template v-else-if="resultType === 'creator'">
             <div class="creator-panel panel">
@@ -422,7 +502,7 @@ onUnmounted(() => { clearInterval(progressTimer); clearTimeout(toastTimer) })
 
           <div v-else class="single-result panel">
             <div class="section-heading"><div><div class="eyebrow">解析结果</div><h2>单个视频</h2></div><span class="result-chip"><Check :size="14" />已识别</span></div>
-            <div class="single-video-card"><div class="single-cover thumb-art" :class="singleVideo.art"><span class="art-orbit"></span><span class="art-copy"><small>山间命理课</small><b>四柱与五行<br />基础概念</b></span><span class="thumb-duration">{{ singleVideo.duration }}</span><span class="play-overlay"><Play :size="20" fill="currentColor" /></span></div><div class="single-video-info"><span class="video-eyebrow"><Radio :size="13" />视频解析成功</span><h3>{{ singleVideo.title }}</h3><div class="single-meta"><span><UserRound :size="14" />{{ creator.name }}</span><span>{{ singleVideo.date }}</span><span>{{ singleVideo.views }} 播放</span></div><div class="single-divider"></div><div class="mode-label">选择处理方式</div><div class="mode-options"><button v-for="mode in modeOptions" :key="mode.id" class="mode-option" :class="{ active: batchAction === mode.id }" @click="batchAction = mode.id"><component :is="mode.icon" :size="17" /><span>{{ mode.label }}</span><span class="mode-radio"><i></i></span></button></div><button class="primary-button single-action" @click="batchAction = batchAction || 'video'; addSingleTask()"><Plus :size="16" />创建任务</button></div></div>
+            <div class="single-video-card"><div class="single-cover thumb-art" :class="singleVideo.cover ? 'has-real-cover' : 'cover-unavailable'"><img v-if="singleVideo.cover" class="real-cover" :src="singleVideo.cover" alt="视频封面" /><span v-else class="cover-placeholder">封面暂不可用</span><span class="thumb-duration">{{ singleVideo.duration }}</span></div><div class="single-video-info"><span class="video-eyebrow"><Radio :size="13" />真实解析结果</span><h3>{{ singleVideo.title }}</h3><div class="single-meta"><span><UserRound :size="14" />{{ singleVideo.owner }}</span><span v-if="singleVideo.bvid">{{ singleVideo.bvid }}</span><span v-if="singleVideo.date">{{ singleVideo.date }}</span><span v-if="singleVideo.views !== null">{{ Number(singleVideo.views).toLocaleString('zh-CN') }} 播放</span></div><div class="single-divider"></div><div class="mode-label">选择处理方式</div><div class="mode-options"><button v-for="mode in modeOptions" :key="mode.id" class="mode-option" :class="{ active: batchAction === mode.id }" @click="batchAction = mode.id"><component :is="mode.icon" :size="17" /><span>{{ mode.label }}</span><span class="mode-radio"><i></i></span></button></div><button class="primary-button single-action" @click="batchAction = batchAction || 'video'; addSingleTask()"><Plus :size="16" />创建任务</button></div></div>
           </div>
         </section>
 
@@ -450,10 +530,11 @@ onUnmounted(() => { clearInterval(progressTimer); clearTimeout(toastTimer) })
         <section v-else class="page-content settings-page">
           <div class="page-heading"><div><div class="eyebrow">PREFERENCES</div><h1>设置</h1><p>管理登录状态、转写服务和文件保存位置。</p></div><span v-if="settingsDirty" class="unsaved-pill">未保存</span><button class="primary-button save-settings" @click="saveSettings"><Check :size="16" />保存设置</button></div>
           <div class="settings-layout"><aside class="settings-nav panel"><span class="settings-nav-label">偏好设置</span><a class="settings-nav-item active"><UserRound :size="16" />账号与服务</a><a class="settings-nav-item"><FolderOpen :size="16" />文件与目录</a><a class="settings-nav-item"><SlidersIcon />任务处理</a><div class="settings-nav-divider"></div><div class="settings-nav-help"><CircleHelp :size="16" /><span>遇到问题？<small>查看使用说明</small></span><ExternalLink :size="13" /></div></aside><div class="settings-content">
-            <section class="settings-card panel"><div class="settings-card-heading"><div class="settings-heading-icon bilibili-icon">哔</div><div><h2>B 站账号</h2><p>登录后可访问需要登录的视频内容</p></div><span class="settings-status" :class="loginState ? 'ok' : 'off'"><i></i>{{ loginState ? '已登录' : '未登录' }}</span></div><div class="setting-divider"></div><div class="account-row"><div class="account-avatar">{{ loginState ? '山' : 'B' }}<span :class="{ online: loginState }"></span></div><div class="account-info"><strong>{{ loginState ? creator.name : '尚未登录 B 站' }}</strong><span>{{ loginState ? 'UID：349327328' : '扫码登录以使用完整解析能力' }}</span></div><button class="outline-button account-button" @click="qrDialog = true"><ScanLine :size="15" />{{ loginState ? '重新登录' : '扫码登录' }}</button></div><div class="settings-tip"><ShieldCheck :size="15" /><span>扫码登录状态仅保存在本机。原型阶段不会向 B 站发起请求。</span></div></section>
+            <section class="settings-card panel"><div class="settings-card-heading"><div class="settings-heading-icon bilibili-icon">哔</div><div><h2>B 站账号</h2><p>登录后可访问需要登录的视频内容</p></div><span class="settings-status" :class="loginState ? 'ok' : 'off'"><i></i>{{ loginState ? '已登录' : '未登录' }}</span></div><div class="setting-divider"></div><div class="account-row"><div class="account-avatar">{{ loginState ? '山' : 'B' }}<span :class="{ online: loginState }"></span></div><div class="account-info"><strong>{{ loginState ? creator.name : '尚未登录 B 站' }}</strong><span>{{ loginState ? 'UID：349327328' : '扫码登录以使用完整解析能力' }}</span></div><button class="outline-button account-button" @click="qrDialog = true"><ScanLine :size="15" />{{ loginState ? '重新登录' : '扫码登录' }}</button></div><div class="settings-tip"><ShieldCheck :size="15" /><span>登录状态仅保存在本机；扫码登录功能尚未接入。</span></div></section>
             <section class="settings-card panel"><div class="settings-card-heading"><div class="settings-heading-icon model-icon"><Sparkles :size="18" /></div><div><h2>文字稿模型</h2><p>用于将视频音频转换为课程文字稿</p></div><span class="fixed-tag"><LockKeyhole :size="12" />固定模型</span></div><div class="model-field"><label>模型</label><div class="model-select"><span class="model-dot"></span><strong>MiMo V2.6 Flash</strong><span class="model-subtle">快速 · 低成本</span><ChevronDown :size="16" /></div><small>转写结果忠实保留原话，不总结、不重写。</small></div><div class="api-key-field"><div class="api-label"><label for="api-key">MiMo API Key</label><a href="#" @click.prevent="notify('API Key 申请链接为演示内容')">如何获取？<ExternalLink :size="12" /></a></div><div class="api-input-row"><div class="key-input"><KeyRound :size="16" /><input id="api-key" v-model="apiKey" :type="showApiKey ? 'text' : 'password'" autocomplete="off" placeholder="输入你的 API Key" @input="apiTested = false" /><button type="button" class="key-visibility" :aria-label="showApiKey ? '隐藏 API Key' : '显示 API Key'" @click="showApiKey = !showApiKey"><component :is="showApiKey ? EyeOff : Eye" :size="15" /></button></div><button class="outline-button test-api-button" :disabled="apiTesting" @click="testApi"><LoaderCircle v-if="apiTesting" class="spin" :size="15" /><Activity v-else :size="15" />{{ apiTesting ? '测试中' : '测试连接' }}</button></div><div class="api-feedback"><span v-if="apiTested" class="success-text"><Check :size="13" />连接成功（演示）</span><span v-else-if="!apiKey.trim()"><LockKeyhole :size="12" />尚未配置 API Key</span><span v-else-if="settingsDirty"><CircleHelp :size="13" />有未保存的更改</span><span v-else><Check :size="13" />已保存到当前演示会话</span></div><div v-if="!apiKey.trim()" class="empty-state api-empty-state"><div class="empty-state-icon"><KeyRound :size="16" /></div><strong>API 尚未配置</strong><span>填写并保存 API Key 后，才可测试连接。</span></div></div></section>
             <section class="settings-card panel"><div class="settings-card-heading"><div class="settings-heading-icon folder-icon"><FolderOpen :size="18" /></div><div><h2>文件与目录</h2><p>设置下载文件和文字稿的保存位置</p></div></div><div class="setting-divider"></div><div class="path-setting"><div><label>视频与音频目录</label><span>下载完成的媒体文件保存位置</span></div><div class="path-control"><input v-model="downloadPath" aria-label="视频与音频目录" /><button class="outline-button path-button" @click="choosePath('video')"><FolderOpen :size="15" />选择</button></div></div><div class="path-setting"><div><label>文字稿目录</label><span>转写完成后导出的 TXT 文件位置</span></div><div class="path-control"><input v-model="transcriptPath" aria-label="文字稿目录" /><button class="outline-button path-button" @click="choosePath('transcript')"><FolderOpen :size="15" />选择</button></div></div><div class="settings-tip folder-tip"><HardDriveDownload :size="15" /><span>原型中显示的是示例路径，不会读写本机文件。</span></div></section>
             <section class="settings-card compact-settings panel"><div class="settings-card-heading"><div class="settings-heading-icon queue-icon"><ListChecks :size="18" /></div><div><h2>任务队列</h2><p>下载与转写任务使用同一个串行队列</p></div></div><div class="queue-setting-line"><span>同时执行的任务</span><span class="serial-value"><span class="live-dot"></span>1 个任务 <span class="locked-mini"><LockKeyhole :size="11" />第一版固定</span></span></div></section>
+            <section class="settings-card debug-logs-card panel"><div class="settings-card-heading"><div class="settings-heading-icon logs-icon"><History :size="18" /></div><div><h2>调试与日志</h2><p>排查问题时可复制近期记录，或导出完整日志</p></div><span class="settings-status" :class="backendStatus === 'online' ? 'ok' : 'off'"><i></i>{{ backendStatus === 'online' ? '后台已连接' : '后台未运行' }}</span></div><div class="setting-divider"></div><div class="logs-location"><span>日志路径</span><code>{{ logPath }}</code></div><div class="logs-state"><span class="logs-state-dot" :class="backendStatus === 'online' && logAvailable ? 'ready' : ''"></span><span>{{ backendStatus !== 'online' ? '启动 npm run dev 后即可查看日志。' : !logAvailable ? '日志文件目前为空，产生记录后即可使用日志工具。' : `日志已就绪 · 当前文件 ${logLineCount} 行` }}</span><small v-if="backendStatus === 'online'">{{ bbdownAvailable ? `BBDownNext v${bbdownVersion || '版本未知'} 已就绪` : '未找到 BBDownNext 可执行文件' }}</small></div><div class="logs-actions"><button class="outline-button" :disabled="backendStatus !== 'online' || !logAvailable || logLoading" @click="copyRecentLogs"><Copy :size="15" />复制最新日志</button><button class="outline-button" :disabled="backendStatus !== 'online' || !logAvailable" @click="exportLogs"><Download :size="15" />导出日志</button><button class="outline-button" :disabled="backendStatus !== 'online'" @click="openLogDirectory"><FolderOpen :size="15" />打开日志目录</button></div><p class="logs-note">日志保留最近约 300 行供复制；完整日志会自动轮换。日志中不会写入 API Key、B 站 Cookie 或访问令牌。</p></section>
           </div></div>
         </section>
       </div>

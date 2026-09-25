@@ -707,6 +707,21 @@ h1 { color: #1f2e42; font-size: 26px; letter-spacing: -.45px; }
 .queue-setting-line { color: #52647a; font-size: 14px; }
 .locked-mini { color: #5f7085; font-size: 11px; }
 .unsaved-pill { font-size: 12px; }
+.single-cover.has-real-cover { background: #e8edf1; }
+.single-cover.has-real-cover::before, .single-cover.has-real-cover::after { display: none; }
+.real-cover { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+.cover-placeholder { position: absolute; inset: 0; display: grid; place-items: center; background: #e8edf1; color: #627388; font-size: 14px; }
+.logs-icon { background: #eef4f8; color: #577d99; }
+.logs-location { display: grid; grid-template-columns: 90px minmax(0, 1fr); align-items: start; gap: 12px; padding: 3px 0 12px; color: #43566d; font-size: 14px; }
+.logs-location code { overflow-wrap: anywhere; color: #40536a; font-family: 'Cascadia Code', Consolas, monospace; font-size: 13px; }
+.logs-state { display: flex; min-height: 38px; align-items: center; gap: 9px; padding: 9px 11px; border-radius: 6px; background: #f6f8fa; color: #596b80; font-size: 13px; }
+.logs-state-dot { width: 8px; height: 8px; flex: 0 0 auto; border-radius: 50%; background: #9aa6b4; }
+.logs-state-dot.ready { background: #2aa66e; box-shadow: 0 0 0 3px #e4f5eb; }
+.logs-state small { margin-left: auto; color: #617287; font-size: 12px; }
+.logs-actions { display: flex; flex-wrap: wrap; gap: 9px; margin-top: 14px; }
+.logs-actions .outline-button { height: 38px; }
+.logs-actions .outline-button:disabled { opacity: .48; }
+.logs-note { margin: 12px 0 0; color: #5e7085; font-size: 12px; line-height: 1.6; }
 .save-settings { height: 42px; }
 .confirm-modal h2 { font-size: 18px; }
 .confirm-modal p { color: #596b80; font-size: 14px; }

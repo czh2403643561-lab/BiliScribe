@@ -14,8 +14,19 @@ BiliScribe 是运行在 Windows 本地的 B 站视频下载与文字稿生成工
 
 ## 当前阶段
 
-当前只开发纯前端 UI 原型，所有数据和交互均为演示用途，不连接真实 B 站、BBDownNext、MiMo、FFmpeg 或后台任务。
+当前已进入真实功能接入阶段：本地后台通过 BBDownNext 解析单个 B 站视频，向前端返回统一格式的视频信息；封面和播放量由公开视频信息补齐。UP 主主页、扫码登录、真实下载、音频下载、MiMo 转写和后台任务执行尚未接入，其余页面交互仍为原型数据。
 
 ## 运行
 
-运行 `npm install` 安装依赖，再用 `npm run dev` 启动本地原型；执行 `npm run build` 可构建前端。
+需要 Windows 和 Node.js 18 或更新版本。BBDownNext 可执行文件默认位于 `tools/BBDownNext/BBDown.exe`；也可在启动前设置 `BBDOWN_PATH` 指向其他位置。
+
+运行 `npm install` 安装依赖，再运行 `npm run dev` 同时启动本地后台和 Vue 页面：
+
+```powershell
+npm install
+npm run dev
+```
+
+页面地址为 `http://127.0.0.1:5173`，仅监听本机回环地址。`npm run dev:api` 和 `npm run dev:ui` 可分别启动后台和前端。后台健康检查地址为 `http://127.0.0.1:4174/api/health`。日志写入 `logs/biliscribe.log`，超过大小上限会轮换。
+
+解析使用 BBDownNext 的 `--info-only --hide-streams`，不触发下载；Vite 将同源 `/api` 请求转发给本地后台。执行 `npm run build` 可检查前端生产构建。
