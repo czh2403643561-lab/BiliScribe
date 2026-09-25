@@ -11,6 +11,14 @@ const executablePath = path.resolve(configuredExe)
 const port = Number(process.env.BILISCRIBE_API_PORT || 4174)
 const parseTimeoutMs = 30_000
 const childProcesses = new Set()
+const productionMode = process.argv.includes('--production')
+const distDirectory = path.join(projectRoot, 'dist')
+
+if (productionMode && !fs.existsSync(path.join(distDirectory, 'index.html'))) {
+  log('error', 'Production server could not start', { reason: 'built frontend dist/index.html is missing' })
+  console.error('正式页面尚未构建。请先运行 npm run build，再重新打开 BiliScribe。')
+  process.exit(1)
+}
 
 function readBBDownVersion() {
   if (!fs.existsSync(executablePath)) return null
@@ -243,6 +251,8 @@ const server = http.createServer(async (request, response) => {
     if (method === 'GET' && pathname === '/api/health') {
       sendJson(response, 200, {
         status: 'ok',
+        mode: productionMode ? 'production' : 'development',
+        webUrl: productionMode ? `http://127.0.0.1:${port}/` : process.env.BILISCRIBE_WEB_URL || null,
         bbdownAvailable: fs.existsSync(executablePath),
         bbdownVersion,
         logPath: getLogPath(),
@@ -281,6 +291,8 @@ const server = http.createServer(async (request, response) => {
         log('info', 'Log directory opened')
         sendJson(response, 200, { opened: true })
       }
+    } else if (productionMode && method === 'GET') {
+      serveFrontend(pathname, response)
     } else {
       statusCode = 404
       sendError(response, 404, 'not_found', '找不到此本地 API。')
@@ -297,14 +309,64 @@ const server = http.createServer(async (request, response) => {
   }
 })
 
+const contentTypes = {
+  '.css': 'text/css; charset=utf-8',
+  '.html': 'text/html; charset=utf-8',
+  '.ico': 'image/x-icon',
+  '.jpeg': 'image/jpeg',
+  '.jpg': 'image/jpeg',
+  '.js': 'text/javascript; charset=utf-8',
+  '.json': 'application/json; charset=utf-8',
+  '.png': 'image/png',
+  '.svg': 'image/svg+xml',
+  '.webp': 'image/webp',
+  '.woff': 'font/woff',
+  '.woff2': 'font/woff2',
+}
+
+function serveFrontend(pathname, response) {
+  let decodedPath
+  try { decodedPath = decodeURIComponent(pathname) } catch {
+    sendError(response, 400, 'invalid_path', '页面地址无效。')
+    return
+  }
+  const relativePath = decodedPath === '/' ? 'index.html' : decodedPath.replace(/^\/+/, '')
+  const candidatePath = path.resolve(distDirectory, relativePath)
+  if (!candidatePath.startsWith(`${distDirectory}${path.sep}`) && candidatePath !== path.join(distDirectory, 'index.html')) {
+    sendError(response, 403, 'invalid_path', '页面地址无效。')
+    return
+  }
+  let filePath = candidatePath
+  if (!fs.existsSync(filePath) || !fs.statSync(filePath).isFile()) {
+    if (path.extname(relativePath)) {
+      sendError(response, 404, 'file_not_found', '找不到此页面文件。')
+      return
+    }
+    filePath = path.join(distDirectory, 'index.html')
+  }
+  response.writeHead(200, {
+    'Content-Type': contentTypes[path.extname(filePath).toLowerCase()] || 'application/octet-stream',
+    'Cache-Control': path.basename(filePath) === 'index.html' ? 'no-cache' : 'public, max-age=31536000, immutable',
+    'X-Content-Type-Options': 'nosniff',
+  })
+  fs.createReadStream(filePath).pipe(response)
+}
+
 server.on('clientError', (error, socket) => {
   log('warn', 'HTTP client error', { message: error.message })
   socket.end('HTTP/1.1 400 Bad Request\r\n\r\n')
 })
 
+server.on('error', (error) => {
+  log('error', 'BiliScribe backend failed to start', { code: error.code || 'server_error', message: error.message, stack: error.stack })
+  console.error(`BiliScribe 本地服务启动失败：${error.code === 'EADDRINUSE' ? `端口 ${port} 已被占用` : error.message}`)
+  process.exit(1)
+})
+
 server.listen(port, '127.0.0.1', () => {
   log('info', 'BiliScribe backend started', {
     address: `http://127.0.0.1:${port}`,
+    mode: productionMode ? 'production' : 'development',
     bbdownAvailable: fs.existsSync(executablePath),
     bbdownVersion,
   })
