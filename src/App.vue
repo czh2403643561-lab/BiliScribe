@@ -309,9 +309,10 @@ const qrImage = ref('')
 const qrSessionId = ref('')
 const qrStatus = ref('idle')
 const qrMessage = ref('')
-const qrStartedLoggedOut = ref(true)
 const logoutConfirm = ref(false)
 let qrPollTimer
+let qrPollInFlight = false
+let qrSuccessCloseTimer
 const qrStatusLabel = computed(() => ({
   idle: '准备生成二维码', loading: '正在生成二维码…', waitingScan: '等待扫码',
   waitingConfirm: '已扫码，请在手机上确认', success: '登录成功', expired: '二维码已过期', failed: '登录失败',
@@ -364,6 +365,7 @@ function stopQrPolling() {
 
 function closeQrDialog() {
   stopQrPolling()
+  clearTimeout(qrSuccessCloseTimer)
   qrDialog.value = false
 }
 
@@ -391,13 +393,13 @@ async function startQrLogin() {
 }
 
 async function openQrDialog() {
-  qrStartedLoggedOut.value = !loginState.value
   qrDialog.value = true
   await startQrLogin()
 }
 
 async function pollQrLogin() {
-  if (!qrSessionId.value || qrStarting.value) return
+  if (!qrSessionId.value || qrStarting.value || qrPollInFlight) return
+  qrPollInFlight = true
   try {
     const response = await fetch(`/api/bilibili/login/qr/${qrSessionId.value}`)
     const result = await response.json()
@@ -406,32 +408,24 @@ async function pollQrLogin() {
     qrMessage.value = result.message || ''
     if (result.state === 'success') {
       stopQrPolling()
+      qrStatus.value = 'success'
+      qrMessage.value = '登录成功'
+      loginState.value = true
       await refreshLoginStatus()
-      if (result.account?.name && !loginAccount.value?.name) loginAccount.value = result.account
+      loginState.value = true
+      if (result.account) loginAccount.value = { ...(loginAccount.value || {}), ...result.account }
       notify(loginAccount.value?.name ? `已登录：${loginAccount.value.name}` : 'B 站登录成功')
-      setTimeout(() => { if (qrDialog.value) closeQrDialog() }, 900)
+      clearTimeout(qrSuccessCloseTimer)
+      qrSuccessCloseTimer = setTimeout(() => { if (qrDialog.value) closeQrDialog() }, 800)
     } else if (['expired', 'failed'].includes(result.state)) {
       stopQrPolling()
-      await refreshLoginStatus()
-      if (qrStartedLoggedOut.value && loginState.value) {
-        qrStatus.value = 'success'
-        qrMessage.value = '已从本机保存的登录状态恢复。'
-        notify(loginAccount.value?.name ? `已登录：${loginAccount.value.name}` : 'B 站登录成功')
-        setTimeout(() => { if (qrDialog.value) closeQrDialog() }, 900)
-      }
     }
   } catch (error) {
     stopQrPolling()
-    await refreshLoginStatus()
-    if (qrStartedLoggedOut.value && loginState.value) {
-      qrStatus.value = 'success'
-      qrMessage.value = '已从本机保存的登录状态恢复。'
-      notify(loginAccount.value?.name ? `已登录：${loginAccount.value.name}` : 'B 站登录成功')
-      setTimeout(() => { if (qrDialog.value) closeQrDialog() }, 900)
-    } else {
-      qrStatus.value = 'failed'
-      qrMessage.value = error.message || '扫码状态读取失败，请刷新二维码重试。'
-    }
+    qrStatus.value = 'failed'
+    qrMessage.value = error.message || '扫码状态读取失败，请刷新二维码重试。'
+  } finally {
+    qrPollInFlight = false
   }
 }
 
@@ -541,7 +535,7 @@ async function openLogDirectory() {
 }
 
 onMounted(() => { progressTimer = setInterval(advanceProgress, 900); refreshBackendStatus(); refreshLoginStatus() })
-onUnmounted(() => { clearInterval(progressTimer); clearInterval(qrPollTimer); clearTimeout(toastTimer) })
+onUnmounted(() => { clearInterval(progressTimer); clearInterval(qrPollTimer); clearTimeout(qrSuccessCloseTimer); clearTimeout(toastTimer) })
 </script>
 
 <template>

@@ -3,13 +3,14 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { spawn, spawnSync } from 'node:child_process'
 import net from 'node:net'
-import { createHash, randomBytes, randomUUID } from 'node:crypto'
+import { randomBytes, randomUUID } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 import { getLogDirectory, getLogPath, log, readCompleteLog, readRecentLogLines } from './logger.js'
 
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const configuredExe = process.env.BBDOWN_PATH || path.join(projectRoot, 'tools', 'BBDownNext', 'BBDown.exe')
 const executablePath = path.resolve(configuredExe)
+const credentialPath = path.join(path.dirname(executablePath), 'BBDown.data')
 const port = Number(process.env.BILISCRIBE_API_PORT || 4174)
 const parseTimeoutMs = 30_000
 const childProcesses = new Set()
@@ -55,7 +56,6 @@ function sendError(response, statusCode, code, message) {
 }
 
 function readSavedWebCookie() {
-  const credentialPath = path.join(path.dirname(executablePath), 'BBDown.data')
   try {
     const data = JSON.parse(fs.readFileSync(credentialPath, 'utf8'))
     return typeof data.cookie === 'string' ? data.cookie : ''
@@ -64,9 +64,13 @@ function readSavedWebCookie() {
   }
 }
 
-function savedCookieFingerprint() {
-  const cookie = readSavedWebCookie()
-  return cookie ? createHash('sha256').update(cookie).digest('hex') : ''
+function credentialRevision() {
+  try {
+    const stat = fs.statSync(credentialPath, { bigint: true })
+    return [stat.mtimeNs, stat.ctimeNs, stat.size, stat.ino].map(String).join(':')
+  } catch {
+    return ''
+  }
 }
 
 async function getBilibiliAccount(cookie) {
@@ -187,7 +191,7 @@ async function requestBBDownServe(endpoint, options = {}) {
 async function startQrLogin(response) {
   for (const [id, session] of authSessions) if (session.expiresAt <= Date.now()) authSessions.delete(id)
   log('info', 'Bilibili QR login requested')
-  const previousCookieFingerprint = savedCookieFingerprint()
+  const previousCredentialRevision = credentialRevision()
   const { response: upstream, body } = await requestBBDownServe('/api/v1/login/qr', {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ channel: 'web' }),
   })
@@ -197,14 +201,36 @@ async function startQrLogin(response) {
     return
   }
   const id = randomUUID()
-  authSessions.set(id, { key: body.qrcodeKey, state: 'waitingScan', expiresAt: Date.now() + 10 * 60_000, account: null, previousCookieFingerprint })
+  authSessions.set(id, { key: body.qrcodeKey, state: 'waitingScan', expiresAt: Date.now() + 10 * 60_000, account: null, previousCredentialRevision, scanned: false, credentialUpdateLogged: false })
+  log('info', 'Bilibili QR started')
   log('info', 'Bilibili QR code generated')
   sendJson(response, 200, { sessionId: id, qrDataUrl: `data:image/png;base64,${body.qrPngBase64}`, state: 'waitingScan' })
 }
 
 async function pollQrLogin(response, id) {
   const session = authSessions.get(id)
-  if (!session || session.expiresAt <= Date.now()) {
+  if (!session) {
+    sendJson(response, 200, { state: 'expired', message: '二维码已过期，请刷新二维码。' })
+    return
+  }
+  const recoverPersistedSuccess = async () => {
+    const currentRevision = credentialRevision()
+    if (!currentRevision || currentRevision === session.previousCredentialRevision) return false
+    if (!session.credentialUpdateLogged) {
+      session.credentialUpdateLogged = true
+      log('info', 'Bilibili credential file updated during QR session')
+    }
+    const status = await getLoginStatus()
+    if (!status.loggedIn) return false
+    session.state = 'success'
+    session.account = status.account
+    log('info', 'Bilibili login verified after QR credential update', { hasAccountName: !!session.account?.name })
+    log('info', 'Bilibili QR success', { hasAccountName: !!session.account?.name })
+    sendJson(response, 200, { state: 'success', account: session.account })
+    return true
+  }
+  if (session.expiresAt <= Date.now()) {
+    if (await recoverPersistedSuccess()) return
     authSessions.delete(id)
     sendJson(response, 200, { state: 'expired', message: '二维码已过期，请刷新二维码。' })
     return
@@ -212,17 +238,6 @@ async function pollQrLogin(response, id) {
   if (session.state === 'success') {
     sendJson(response, 200, { state: 'success', account: session.account })
     return
-  }
-  const recoverPersistedSuccess = async () => {
-    const currentFingerprint = savedCookieFingerprint()
-    if (!currentFingerprint || currentFingerprint === session.previousCookieFingerprint) return false
-    const status = await getLoginStatus()
-    if (!status.loggedIn) return false
-    session.state = 'success'
-    session.account = status.account
-    log('info', 'Bilibili QR login succeeded; restored from local credentials', { hasAccountName: !!session.account?.name })
-    sendJson(response, 200, { state: 'success', account: session.account })
-    return true
   }
   try {
     const { response: upstream, body } = await requestBBDownServe(`/api/v1/login/qr/${encodeURIComponent(session.key)}`)
@@ -239,17 +254,26 @@ async function pollQrLogin(response, id) {
       return
     }
     const nextState = String(body.state)
+    if (nextState === 'waitingConfirm' && !session.scanned) {
+      session.scanned = true
+      log('info', 'Bilibili QR scanned; awaiting confirmation')
+    }
+    if (await recoverPersistedSuccess()) return
     if (nextState !== session.state && ['waitingConfirm', 'expired', 'failed'].includes(nextState)) {
-      const event = { waitingConfirm: 'Bilibili QR scanned, awaiting confirmation', expired: 'Bilibili QR login expired', failed: 'Bilibili QR login failed' }[nextState]
+      const event = { waitingConfirm: 'Bilibili QR awaiting phone confirmation', expired: 'Bilibili QR login expired', failed: 'Bilibili QR login failed' }[nextState]
       log(nextState === 'failed' ? 'warn' : 'info', event)
     }
     if (nextState === 'success') {
       // BBDownNext persists the WEB credential itself; never forward its credential payload.
-      session.account = body.accountName ? { name: String(body.accountName), avatar: '', uid: '' } : null
+      const confirmedName = body.accountName ? String(body.accountName) : ''
       const status = await getLoginStatus()
-      session.account = status.account || session.account
+      const verifiedAccount = status.account
+      session.account = confirmedName
+        ? { name: confirmedName, avatar: verifiedAccount?.name === confirmedName ? verifiedAccount.avatar : '', uid: verifiedAccount?.name === confirmedName ? verifiedAccount.uid : '' }
+        : verifiedAccount
       session.state = 'success'
-      log('info', 'Bilibili QR login succeeded', { hasAccountName: !!session.account?.name })
+      log('info', 'Bilibili login verified', { hasAccountName: !!session.account?.name })
+      log('info', 'Bilibili QR success', { hasAccountName: !!session.account?.name })
       sendJson(response, 200, { state: 'success', account: session.account })
       return
     }
@@ -259,6 +283,7 @@ async function pollQrLogin(response, id) {
       message: session.state === 'waitingConfirm' ? '已扫码，请在手机上确认登录。' : session.state === 'expired' ? '二维码已过期，请刷新二维码。' : session.state === 'failed' ? '登录失败，请刷新二维码重试。' : '等待扫码',
     })
   } catch (error) {
+    if (await recoverPersistedSuccess()) return
     session.state = 'failed'
     log('warn', 'Bilibili QR login poll failed', { code: error.code || 'poll_error' })
     sendJson(response, 200, { state: 'failed', message: '扫码状态读取失败，请刷新二维码重试。' })
