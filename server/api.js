@@ -771,9 +771,110 @@ async function ensureWritableDirectory(directory) {
   }
 }
 
-function safeDirectoryName(value) {
-  const cleaned = String(value || 'B站视频').replace(/[<>:"/\\|?*\u0000-\u001f]/g, '_').replace(/[. ]+$/g, '').trim()
-  return (cleaned || 'B站视频').slice(0, 72)
+function safeDirectoryName(value, maxLength = 60) {
+  let cleaned = String(value || 'B站视频').replace(/[<>:"/\\|?*\u0000-\u001f]/g, '_').replace(/[. ]+$/g, '').trim()
+  cleaned = (cleaned || 'B站视频').slice(0, maxLength).replace(/[. ]+$/g, '')
+  if (/^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(cleaned)) cleaned = `_${cleaned}`
+  return cleaned || 'B站视频'
+}
+
+function taskCollectionDirectory(task) {
+  if (!task.creatorName || !task.groupName) return ''
+  return path.join(downloadDirectory, safeDirectoryName(task.creatorName), safeDirectoryName(task.groupName))
+}
+
+function taskMediaDirectory(task) {
+  const mediaFolder = task.mode === 'audio' ? '音频' : '视频'
+  const collectionDirectory = taskCollectionDirectory(task)
+  if (collectionDirectory) return path.join(collectionDirectory, mediaFolder)
+  return path.join(downloadDirectory, safeDirectoryName(task.title), mediaFolder)
+}
+
+function finalMediaPath(task, sourcePath, index = 0) {
+  const extension = path.extname(sourcePath).toLowerCase()
+  const suffix = index ? ` (${index + 1})` : ''
+  let base = safeDirectoryName(task.title, 84).slice(0, 84 - extension.length - suffix.length)
+  let destination = path.join(task.outputDirectory, `${base}${suffix}${extension}`)
+  if (fs.existsSync(destination) && path.resolve(destination) !== path.resolve(sourcePath)) {
+    const collisionSuffix = ` (${task.bvid})${suffix}`
+    base = safeDirectoryName(task.title, 84).slice(0, 84 - extension.length - collisionSuffix.length)
+    destination = path.join(task.outputDirectory, `${base}${collisionSuffix}${extension}`)
+  }
+  if (fs.existsSync(destination) && path.resolve(destination) !== path.resolve(sourcePath)) {
+    const attemptSuffix = ` (${task.bvid}-${task.attempt})${suffix}`
+    base = safeDirectoryName(task.title, 84).slice(0, 84 - extension.length - attemptSuffix.length)
+    destination = path.join(task.outputDirectory, `${base}${attemptSuffix}${extension}`)
+  }
+  return destination
+}
+
+async function openExplorerLocation(resolvedTarget, isFile, taskId) {
+  if (isFile) {
+    const encodedTarget = Buffer.from(resolvedTarget, 'utf8').toString('base64')
+    const script = [
+      "$ErrorActionPreference = 'Stop'",
+      `$target = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${encodedTarget}'))`,
+      "$parent = [System.IO.Path]::GetDirectoryName($target)",
+      "$name = [System.IO.Path]::GetFileName($target)",
+      "$shell = New-Object -ComObject Shell.Application",
+      "$shell.Explore($parent)",
+      "$selected = $false",
+      "for ($i = 0; $i -lt 40 -and -not $selected; $i++) {",
+      "  Start-Sleep -Milliseconds 150",
+      "  foreach ($window in $shell.Windows()) {",
+      "    try {",
+      "      $folderPath = $window.Document.Folder.Self.Path",
+      "      if ([System.IO.Path]::GetFullPath($folderPath).TrimEnd('\\') -ieq $parent.TrimEnd('\\')) {",
+      "        $item = $window.Document.Folder.ParseName($name)",
+      "        if ($item) { $window.Document.SelectItem($item, 29); $selected = $true; break }",
+      "      }",
+      "    } catch {}",
+      "  }",
+      "}",
+      "if ($selected) { exit 0 } else { exit 2 }",
+    ].join('\n')
+    const encodedScript = Buffer.from(script, 'utf16le').toString('base64')
+    const helper = spawn('powershell.exe', ['-NoLogo', '-NoProfile', '-NonInteractive', '-WindowStyle', 'Hidden', '-EncodedCommand', encodedScript], {
+      windowsHide: true, stdio: 'ignore',
+    })
+    await new Promise((resolve, reject) => {
+      let settled = false
+      const timeout = setTimeout(() => {
+        if (settled) return
+        settled = true
+        helper.kill()
+        reject(Object.assign(new Error('文件资源管理器未能定位到下载文件。'), { code: 'explorer_selection_timeout' }))
+      }, 12_000)
+      helper.once('spawn', () => log('info', 'Explorer file selection helper spawned', { taskId, pid: helper.pid || null }))
+      helper.once('error', (error) => {
+        if (settled) return
+        settled = true
+        clearTimeout(timeout)
+        reject(error)
+      })
+      helper.once('close', (exitCode, signal) => {
+        if (settled) return
+        settled = true
+        clearTimeout(timeout)
+        log(exitCode === 0 ? 'info' : 'error', 'Explorer file selection completed', { taskId, exitCode, signal, selected: exitCode === 0 })
+        if (exitCode === 0) resolve()
+        else reject(Object.assign(new Error('无法在文件资源管理器中定位下载文件。'), { code: 'explorer_selection_failed' }))
+      })
+    })
+    return
+  }
+
+  const explorer = spawn('explorer.exe', [resolvedTarget], {
+    cwd: process.env.SystemRoot || 'C:\\Windows', detached: true, stdio: 'ignore', windowsHide: false,
+  })
+  await new Promise((resolve, reject) => {
+    explorer.once('spawn', () => {
+      log('info', 'Explorer directory spawned', { taskId, pid: explorer.pid || null })
+      resolve()
+    })
+    explorer.once('error', reject)
+  })
+  explorer.unref()
 }
 
 async function listMediaFiles(directory, mode) {
@@ -835,8 +936,8 @@ async function runDownloadTask(task) {
   task.error = ''
   task.completedAt = null
   task.attempt = (task.attempt || 0) + 1
-  const safeTitle = safeDirectoryName(task.title)
-  task.outputDirectory = path.join(downloadDirectory, `${task.bvid} - ${safeTitle} (${task.attempt})`)
+  task.outputDirectory = taskMediaDirectory(task)
+  task.workDirectory = path.join(downloadDirectory, '.biliscribe-work', `${task.id}-${task.attempt}`)
   task.outputPath = ''
   task.fileSize = 0
   saveLocalState()
@@ -845,7 +946,10 @@ async function runDownloadTask(task) {
   try {
     if (!fs.existsSync(executablePath)) throw Object.assign(new Error('未找到 BBDownNext，请确认 tools/BBDownNext/BBDown.exe 存在。'), { code: 'bbdown_unavailable' })
     await ensureWritableDirectory(downloadDirectory)
+    const collectionDirectory = taskCollectionDirectory(task)
+    if (collectionDirectory) await fs.promises.mkdir(path.join(collectionDirectory, '文字稿'), { recursive: true })
     await ensureWritableDirectory(task.outputDirectory)
+    await ensureWritableDirectory(task.workDirectory)
     if (task.cancelRequested) {
       task.status = 'cancelled'
       task.phase = '已取消'
@@ -858,7 +962,7 @@ async function runDownloadTask(task) {
       throw Object.assign(new Error('下载完整视频需要 FFmpeg 合并音视频；请安装 FFmpeg 并加入 PATH 后重试。'), { code: 'ffmpeg_unavailable' })
     }
 
-    const args = [task.url, '--get', task.mode === 'audio' ? 'a' : 'av', '--work-dir', task.outputDirectory, '--file-pattern', `[<bvid>] <videoTitle>`, '--stop-on-error']
+    const args = [task.url, '--get', task.mode === 'audio' ? 'a' : 'av', '--work-dir', task.workDirectory, '--file-pattern', '<videoTitle>', '--stop-on-error']
     if (task.mode === 'audio') args.push('--mux', 'None')
     else args.push('--mux', 'Mpeg4', '--ffmpeg-path', ffmpegPath)
 
@@ -919,15 +1023,20 @@ async function runDownloadTask(task) {
       return
     }
 
-    const files = await listMediaFiles(task.outputDirectory, task.mode)
+    let files = await listMediaFiles(task.workDirectory, task.mode)
     if (!files.length) {
       task.status = 'failed'
       task.phase = '未找到输出文件'
       task.error = 'BBDownNext 已结束，但没有找到完整媒体文件；可能的临时文件已保留。'
       task.completedAt = new Date().toISOString()
-      log('error', 'Download task output missing', { taskId: task.id, bvid: task.bvid, mode: task.mode, outputDirectory: task.outputDirectory, durationMs: Date.now() - startedAt })
+      log('error', 'Download task output missing', { taskId: task.id, bvid: task.bvid, mode: task.mode, outputDirectory: task.outputDirectory, workDirectory: task.workDirectory, durationMs: Date.now() - startedAt })
       return
     }
+    files = await Promise.all(files.map(async (file, index) => {
+      const destination = finalMediaPath(task, file.path, index)
+      if (path.resolve(destination) !== path.resolve(file.path)) await fs.promises.rename(file.path, destination)
+      return { ...file, path: destination }
+    }))
     task.status = 'completed'
     task.phase = '已完成'
     task.outputFiles = files.map((file) => file.path)
@@ -991,6 +1100,7 @@ async function createDownloadTask(request, response) {
     id: randomUUID(), bvid, url: canonicalUrl,
     title: String(body.title || bvid).slice(0, 300),
     owner: String(body.owner || '未知 UP 主').slice(0, 120),
+    creatorName: '', groupName: '',
     mode: body.mode, status: 'waiting', phase: '等待中', progress: null,
     outputPath: '', outputDirectory: '', outputFiles: [], fileSize: 0,
     error: '', createdAt: new Date().toISOString(), completedAt: null, attempt: 0,
@@ -1020,6 +1130,8 @@ async function createBatchDownloadTasks(request, response) {
       bvid: result.bvid, url: result.canonicalUrl,
       title: String(video.title || result.bvid).slice(0, 300),
       owner: String(video.owner || '未知 UP 主').slice(0, 120),
+      creatorName: String(video.creatorName || '').slice(0, 120),
+      groupName: String(video.groupName || '').slice(0, 120),
     }
   })
   const unique = [...new Map(normalized.map((video) => [video.bvid, video])).values()]
@@ -1110,23 +1222,29 @@ async function handleTaskAction(request, response, method, pathname) {
       sendError(response, 501, 'unsupported_platform', '打开文件位置仅支持 Windows。')
       return true
     }
-    if (!fs.existsSync(task.outputPath)) {
+    const resolvedTarget = path.resolve(task.outputPath)
+    log('info', 'Open download location requested', { taskId: id, target: task.outputPath, resolvedTarget })
+    if (!fs.existsSync(resolvedTarget)) {
+      log('warn', 'Open download target missing', { taskId: id, resolvedTarget })
       sendError(response, 404, 'output_not_found', '下载文件已不存在，请检查保存目录。')
       return true
     }
-    const outputStats = fs.statSync(task.outputPath)
+    const outputStats = fs.statSync(resolvedTarget)
     const isFile = outputStats.isFile()
-    const target = isFile ? `/select,${path.resolve(task.outputPath)}` : path.resolve(task.outputPath)
-    const explorer = spawn('explorer.exe', [target], {
-      cwd: isFile ? path.dirname(path.resolve(task.outputPath)) : path.resolve(task.outputPath),
-      detached: true, stdio: 'ignore', windowsHide: false,
-    })
-    await new Promise((resolve, reject) => {
-      explorer.once('spawn', resolve)
-      explorer.once('error', reject)
-    })
-    explorer.unref()
-    sendJson(response, 200, { opened: true, located: isFile })
+    const targetType = isFile ? 'file' : outputStats.isDirectory() ? 'directory' : 'other'
+    if (targetType === 'other') {
+      sendError(response, 400, 'invalid_output_target', '保存位置不是文件或文件夹。')
+      return true
+    }
+    log('info', 'Launching Explorer for download location', { taskId: id, resolvedTarget, targetType })
+    try {
+      await openExplorerLocation(resolvedTarget, isFile, id)
+    } catch (error) {
+      log('error', 'Explorer failed to open download location', { taskId: id, resolvedTarget, targetType, code: error.code || 'explorer_spawn_failed', message: error.message, stack: error.stack })
+      sendError(response, 500, error.code || 'explorer_spawn_failed', error.message || '无法打开下载文件位置。')
+      return true
+    }
+    sendJson(response, 200, { opened: true, located: isFile, targetType })
     return true
   }
   if (method === 'POST' && action === 'retry' && task.status === 'failed') {

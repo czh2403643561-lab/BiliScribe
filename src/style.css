@@ -822,9 +822,89 @@ h1 { color: #1f2e42; font-size: 26px; letter-spacing: -.45px; }
   .creator-search { width: 165px; }
 }
 @media (max-width: 980px) {
-  .creator-search { width: 100%; margin: 3px 0 0; }
+.creator-search { width: 100%; margin: 3px 0 0; }
   .creator-toolbar { padding-top: 8px; padding-bottom: 8px; }
   .unsaved-pill { margin-left: auto; }
+}
+
+/* Clear parent/child hierarchy for creator collections and their videos. */
+.album-list { gap: 13px; padding: 14px 18px 10px; }
+.album-card { overflow: hidden; border: 1px solid #dce4eb; border-radius: 9px; background: #fff; }
+.album-heading { min-height: 86px; padding: 12px 16px; background: #f2f6f9; }
+.album-heading .album-check { margin-right: 1px; }
+.album-heading .album-cover { width: 112px; height: 63px; border: 1px solid rgba(37, 58, 76, .12); }
+.album-info { gap: 8px; }
+.album-title-row { gap: 9px; }
+.album-title-row strong { font-size: 16px; font-weight: 650; }
+.album-tag { gap: 5px; padding: 4px 7px; color: #536b7e; font-size: 12px; }
+.album-tag svg { color: #4381a9; }
+.album-subtitle { color: #5f7083; font-size: 13px; }
+.album-expand { min-width: 77px; justify-content: center; margin-left: auto; padding: 8px; color: #355a73; font-size: 13px; }
+.album-expand:hover { border-radius: 6px; background: #e6eef4; }
+.video-list { position: relative; margin: 0 0 0 30px; padding: 5px 0 5px 14px; border-top: 1px solid #e6ebef; background: #fbfcfd; }
+.video-list::before { position: absolute; top: 7px; bottom: 7px; left: 0; width: 2px; border-radius: 2px; background: #d8e3eb; content: ''; }
+.video-row { min-height: 76px; gap: 12px; padding: 9px 13px 9px 4px; border-bottom-color: #e8edf1; background: transparent; }
+.video-row:hover { background: #f4f8fb; }
+.video-row.selected { background: #edf6fc; }
+.video-thumb { width: 96px; height: 54px; border: 1px solid #e0e7ec; }
+.video-details > strong { font-size: 14px; }
+.video-meta { margin-top: 2px; font-size: 12px; }
+.video-trailing .format-label { font-size: 12px; }
+
+/* Compact download manager layout. */
+.task-page-heading { margin-bottom: 17px; }
+.task-page-heading > .page-heading { margin-bottom: 0; }
+.task-page-heading .page-heading > div:first-child { margin-right: auto; }
+.task-page-heading h1 { margin-bottom: 0; }
+.task-heading-tools { display: flex; align-items: center; gap: 18px; margin-top: 11px; }
+.task-statistics { display: flex; align-items: center; gap: 14px; color: #5c6d80; font-size: 14px; }
+.task-statistics strong { margin-left: 4px; color: #2d4055; font-size: 16px; font-weight: 650; font-variant-numeric: tabular-nums; }
+.task-statistics i, .history-task-meta i { width: 1px; height: 14px; background: #d8dfe5; }
+.task-page-heading .outline-button { height: 37px; padding: 0 11px; }
+.task-serial-hint { margin: 8px 0 0; color: #64758a; font-size: 13px; }
+.task-section { min-height: 280px; }
+.task-toolbar { min-height: 58px; }
+.filter-tabs { gap: 6px; }
+.filter-tabs button { height: 38px; padding: 0 13px; color: #53657a; font-size: 14px; }
+.filter-tabs button.active { background: #edf6fc; color: #176fa9; }
+.filter-tabs button span { min-width: 20px; height: 20px; font-size: 12px; }
+.download-list { padding: 0 22px; }
+.download-row { display: flex; min-height: 76px; align-items: center; gap: 14px; border-bottom: 1px solid #e8edf1; }
+.download-row:last-child { border-bottom: 0; }
+.download-row .task-type-icon { width: 38px; height: 38px; border-radius: 9px; }
+.download-row.running-row { min-height: 112px; margin: 0 -22px; padding: 14px 22px; border-left: 3px solid #2586c1; background: #f5f9fc; }
+.download-task-main { display: flex; min-width: 0; flex: 1; flex-direction: column; gap: 7px; }
+.download-task-title { display: flex; min-width: 0; align-items: center; gap: 10px; }
+.download-task-title > strong { overflow: hidden; color: #2e4055; font-size: 15px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
+.download-mode { flex: 0 0 auto; color: #586b80; font-size: 13px; }
+.download-phase { display: flex; align-items: center; gap: 9px; color: #63748a; font-size: 13px; }
+.download-phase .task-status { font-size: 12px; }
+.download-progress-track { position: relative; overflow: hidden; width: min(460px, 100%); height: 5px; margin-top: 2px; border-radius: 5px; background: #dfe9f0; }
+.download-progress-track > span { display: block; height: 100%; border-radius: inherit; background: #2187c7; }
+.download-progress-track > i { position: absolute; top: 0; bottom: 0; left: -30%; width: 30%; border-radius: inherit; background: #248acb; animation: download-indeterminate 1.5s ease-in-out infinite; }
+.real-progress-label { color: #53667b; font-size: 12px; }
+@keyframes download-indeterminate { from { left: -30%; } to { left: 100%; } }
+.download-row .cancel-button, .download-row .remove-button, .download-row .retry-button, .download-row .task-open-button { height: 35px; padding: 0 11px; font-size: 13px; }
+.queue-index { width: 23px; color: #75869a; font-size: 12px; }
+.history-row { min-height: 75px; }
+.history-task-meta { display: flex; align-items: center; gap: 10px; color: #64758a; font-size: 13px; }
+.history-task-meta i { height: 12px; }
+.history-task-error { overflow: hidden; max-width: 780px; color: #a95450; font-size: 13px; text-overflow: ellipsis; white-space: nowrap; }
+.history-download-list .task-status { font-size: 12px; }
+.history-download-list .task-empty { min-height: 270px; }
+.tasks-page .task-empty { min-height: 280px; }
+@media (max-width: 760px) {
+  .task-page-heading .page-heading { align-items: flex-start; }
+  .task-heading-tools { align-items: flex-end; flex-direction: column; gap: 8px; }
+  .task-statistics { gap: 8px; font-size: 12px; }
+  .task-statistics strong { font-size: 14px; }
+  .download-list { padding: 0 13px; }
+  .download-row.running-row { margin: 0 -13px; padding-right: 13px; padding-left: 13px; }
+  .download-task-title { flex-wrap: wrap; gap: 4px 8px; }
+  .download-row { gap: 9px; }
+  .video-list { margin-left: 18px; padding-left: 9px; }
+  .album-heading { gap: 8px; padding: 10px; }
+  .album-heading .album-cover { width: 90px; height: 51px; }
 }
 
 /* Keep final text sizing above the prototype component defaults. */

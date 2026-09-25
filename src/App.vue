@@ -165,16 +165,20 @@ const taskIcon = { video: Film, audio: AudioLines, transcript: FileText }
 const CalendarIcon = CalendarDays
 const SlidersIcon = SlidersHorizontal
 const tasks = ref([])
-const taskFilter = ref('全部')
-const taskFilters = ['全部', '进行中', '等待', '已完成', '失败']
-const filteredTasks = computed(() => {
-  const map = { 进行中: ['running'], 等待: ['waiting'], 已完成: ['completed'], 失败: ['failed'] }
-  return tasks.value.filter((task) => taskFilter.value === '全部' || map[taskFilter.value]?.includes(task.status))
-})
+const taskTab = ref('active')
 const runningTask = computed(() => tasks.value.find((task) => task.status === 'running'))
 const waitingTasks = computed(() => tasks.value.filter((task) => task.status === 'waiting'))
+const activeTasks = computed(() => tasks.value.filter((task) => ['running', 'waiting'].includes(task.status)))
+const historyTasks = computed(() => tasks.value.filter((task) => ['completed', 'failed', 'cancelled'].includes(task.status)).slice().reverse())
 const completedCount = computed(() => tasks.value.filter((task) => task.status === 'completed').length)
+const failedCount = computed(() => tasks.value.filter((task) => task.status === 'failed').length)
 const queueCount = computed(() => waitingTasks.value.length)
+
+function formatTaskDate(value) {
+  if (!value) return '—'
+  const date = new Date(value)
+  return Number.isNaN(date.getTime()) ? '—' : date.toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })
+}
 
 function formatFileSize(bytes) {
   const size = Number(bytes) || 0
@@ -224,7 +228,10 @@ async function createBatchTasks() {
   try {
     const response = await fetch('/api/tasks/batch', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ mode: batchAction.value, videos: selected.map(({ bvid, title, owner }) => ({ bvid, title, owner })) }),
+      body: JSON.stringify({ mode: batchAction.value, videos: selected.map((video) => {
+        const group = creatorGroups.value.find((item) => item.videos.some((entry) => entry.id === video.id))
+        return { bvid: video.bvid, title: video.title, owner: video.owner, creatorName: creator.value.name, groupName: group?.title || '其他视频' }
+      }) }),
     })
     const result = await response.json()
     if (!response.ok) throw new Error(result.error?.message || '批量创建任务失败。')
@@ -660,17 +667,19 @@ onUnmounted(() => { clearInterval(taskPollTimer); clearInterval(qrPollTimer); cl
         </section>
 
         <section v-else-if="page === 'tasks'" class="page-content tasks-page">
-          <div class="page-heading"><div><div class="eyebrow">TASK CENTER</div><h1>任务</h1><p>视频与音频下载按加入顺序串行执行，一次只处理一个任务。</p></div><button class="outline-button" :disabled="!tasks.some((task) => ['completed', 'failed', 'cancelled'].includes(task.status))" @click="requestClearHistory"><Trash2 :size="15" />清除历史</button></div>
-          <div class="task-overview"><div class="overview-card active-overview"><div class="overview-icon"><Activity :size="18" /></div><div><span>当前执行</span><strong>{{ runningTask ? '1' : '0' }}<small> 个任务</small></strong></div><span class="overview-live"><i></i>单任务</span></div><div class="overview-card"><div class="overview-icon queue"><Clock3 :size="18" /></div><div><span>等待队列</span><strong>{{ queueCount }}<small> 个任务</small></strong></div></div><div class="overview-card"><div class="overview-icon done"><Check :size="18" /></div><div><span>已完成</span><strong>{{ completedCount }}<small> 个任务</small></strong></div></div><div class="serial-note"><LockKeyhole :size="16" /><span>串行处理</span><small>当前任务完成后自动开始下一项</small></div></div>
-          <div class="task-section panel"><div class="task-toolbar"><div class="filter-tabs"><button v-for="filter in taskFilters" :key="filter" :class="{ active: taskFilter === filter }" @click="taskFilter = filter">{{ filter }}<span v-if="filter === '等待' && queueCount">{{ queueCount }}</span></button></div></div>
-            <div v-if="!filteredTasks.length" class="empty-state task-empty"><div class="empty-state-icon"><ListChecks :size="19" /></div><strong>{{ tasks.length ? '没有符合条件的任务' : '还没有任务' }}</strong><span>{{ tasks.length ? '切换筛选条件查看其他任务。' : '创建一个新任务后，它会显示在这里。' }}</span></div>
-            <template v-else>
-              <div v-if="taskFilter === '全部' || taskFilter === '进行中'" class="task-group current-task-group"><div class="task-group-heading"><div><span class="group-dot running"></span><strong>正在执行</strong><span class="group-hint">当前唯一任务</span></div><span class="group-count">{{ runningTask ? '01' : '00' }}</span></div><div v-if="runningTask" class="task-row running-row"><div class="task-type-icon" :class="runningTask.mode"><component :is="taskIcon[runningTask.mode]" :size="18" /></div><div class="task-main"><div class="task-title-row"><strong>{{ runningTask.title }}</strong><span class="task-status running"><LoaderCircle class="spin" :size="12" />{{ runningTask.phase || '准备中' }}</span></div><div class="task-subtitle">{{ runningTask.owner }} <i>·</i> {{ taskNames[runningTask.mode] }}</div><div class="task-progress-line"><span class="phase-indicator"></span><span>{{ runningTask.phase || '准备中' }}</span></div></div><button class="cancel-button" :disabled="runningTask.phase === '正在取消'" @click="requestCancelRunning(runningTask)"><X :size="14" />{{ runningTask.phase === '正在取消' ? '正在取消' : '取消' }}</button></div><div v-else class="empty-inline"><CheckCheck :size="18" />当前没有正在执行的任务</div></div>
-              <div v-if="taskFilter === '全部' || taskFilter === '等待'" class="task-group"><div class="task-group-heading"><div><span class="group-dot waiting"></span><strong>等待队列</strong><span class="group-hint">按加入顺序执行</span></div><span class="group-count">{{ String(waitingTasks.length).padStart(2, '0') }}</span></div><div v-if="waitingTasks.length" class="waiting-list"><div v-for="(task, index) in waitingTasks" :key="task.id" class="task-row waiting-row"><div class="queue-index">{{ String(index + 1).padStart(2, '0') }}</div><div class="task-type-icon" :class="task.mode"><component :is="taskIcon[task.mode]" :size="18" /></div><div class="task-main"><div class="task-title-row"><strong>{{ task.title }}</strong><span class="task-status waiting"><Clock3 :size="12" />等待中</span></div><div class="task-subtitle">{{ task.owner }} <i>·</i> {{ taskNames[task.mode] }} <i>·</i> 加入队列</div></div><button class="remove-button" @click="removeWaitingTask(task)"><Trash2 :size="14" />移除</button></div></div><div v-else class="empty-inline"><Clock3 :size="18" />队列中没有等待任务</div></div>
-              <div v-if="taskFilter !== '进行中' && taskFilter !== '等待'" class="task-group history-group"><div class="task-group-heading"><div><span class="group-dot history"></span><strong>任务记录</strong><span class="group-hint">已完成、失败与取消</span></div><span class="group-count">{{ String(filteredTasks.filter((task) => ['completed', 'failed', 'cancelled'].includes(task.status)).length).padStart(2, '0') }}</span></div><div v-if="filteredTasks.some((task) => ['completed', 'failed', 'cancelled'].includes(task.status))" class="history-list"><div v-for="task in filteredTasks.filter((item) => ['completed', 'failed', 'cancelled'].includes(item.status))" :key="task.id" class="task-row history-row"><div class="task-type-icon" :class="task.mode"><component :is="taskIcon[task.mode]" :size="18" /></div><div class="task-main"><div class="task-title-row"><strong>{{ task.title }}</strong><span class="task-status" :class="task.status"><Check v-if="task.status === 'completed'" :size="12" /><XCircle v-else :size="12" />{{ task.status === 'completed' ? '已完成' : task.status === 'failed' ? '失败' : '已取消' }}</span></div><div class="task-subtitle">{{ task.owner }} <i>·</i> {{ taskNames[task.mode] }} <i>·</i> {{ task.status === 'completed' ? formatFileSize(task.fileSize) : task.error || task.phase }}</div><div v-if="task.outputPath && task.status === 'completed'" class="task-output-path" :title="task.outputPath">{{ task.outputPath }}</div></div><button v-if="task.status === 'completed'" class="outline-button task-open-button" @click="openTaskLocation(task)"><FolderOpen :size="14" />打开位置</button><button v-if="task.status === 'failed'" class="retry-button" @click="retryTask(task)"><RefreshCw :size="14" />重试</button></div></div><div v-else class="empty-inline"><History :size="18" />暂无符合条件的历史记录</div></div>
-            </template>
+          <div class="task-page-heading"><div class="page-heading"><div><div class="eyebrow">DOWNLOADS</div><h1>任务</h1></div><div class="task-heading-tools"><div class="task-statistics"><span>正在处理 <strong>{{ runningTask ? 1 : 0 }}</strong></span><i></i><span>已完成 <strong>{{ completedCount }}</strong></span><i></i><span>失败 <strong>{{ failedCount }}</strong></span></div><button class="outline-button" :disabled="!historyTasks.length" @click="requestClearHistory"><Trash2 :size="15" />清空记录</button></div></div><p class="task-serial-hint">一次处理一个任务，完成后自动继续下一项。</p></div>
+          <div class="task-section panel">
+            <div class="task-toolbar"><div class="filter-tabs"><button :class="{ active: taskTab === 'active' }" @click="taskTab = 'active'">正在处理<span v-if="activeTasks.length">{{ activeTasks.length }}</span></button><button :class="{ active: taskTab === 'history' }" @click="taskTab = 'history'">已完成<span v-if="historyTasks.length">{{ historyTasks.length }}</span></button></div></div>
+            <div v-if="taskTab === 'active'" class="download-list">
+              <div v-if="runningTask" class="download-row running-row"><div class="task-type-icon" :class="runningTask.mode"><component :is="taskIcon[runningTask.mode]" :size="19" /></div><div class="download-task-main"><div class="download-task-title"><strong>{{ runningTask.title }}</strong><span class="download-mode">{{ taskNames[runningTask.mode] }}</span></div><div class="download-phase"><span class="task-status running">{{ runningTask.phase || '准备中' }}</span><span>{{ runningTask.owner }}</span></div><div class="download-progress-track" role="progressbar" aria-label="下载处理中"><span v-if="typeof runningTask.progress === 'number'" :style="{ width: `${runningTask.progress}%` }"></span><i v-else></i></div><span v-if="typeof runningTask.progress === 'number'" class="real-progress-label">{{ runningTask.progress }}%</span></div><button class="cancel-button" :disabled="runningTask.phase === '正在取消'" @click="requestCancelRunning(runningTask)"><X :size="14" />{{ runningTask.phase === '正在取消' ? '正在取消' : '取消' }}</button></div>
+              <div v-for="(task, index) in waitingTasks" :key="task.id" class="download-row waiting-row"><div class="queue-index">{{ String(index + 1).padStart(2, '0') }}</div><div class="task-type-icon" :class="task.mode"><component :is="taskIcon[task.mode]" :size="18" /></div><div class="download-task-main"><div class="download-task-title"><strong>{{ task.title }}</strong><span class="download-mode">{{ taskNames[task.mode] }}</span></div><div class="download-phase"><span class="task-status waiting">等待中</span><span>{{ task.owner }}</span></div></div><button class="remove-button" @click="removeWaitingTask(task)"><Trash2 :size="14" />移除</button></div>
+              <div v-if="!activeTasks.length" class="empty-state task-empty"><div class="empty-state-icon"><ListChecks :size="19" /></div><strong>当前没有待处理任务</strong><span>新建下载任务后会在这里显示。</span></div>
+            </div>
+            <div v-else class="download-list history-download-list">
+              <div v-for="task in historyTasks" :key="task.id" class="download-row history-row"><div class="task-type-icon" :class="task.mode"><component :is="taskIcon[task.mode]" :size="18" /></div><div class="download-task-main"><div class="download-task-title"><strong>{{ task.title }}</strong><span class="download-mode">{{ taskNames[task.mode] }}</span><span class="task-status" :class="task.status">{{ task.status === 'completed' ? '已完成' : task.status === 'failed' ? '失败' : '已取消' }}</span></div><div v-if="task.status === 'completed'" class="history-task-meta"><span>{{ formatFileSize(task.fileSize) }}</span><i></i><span>{{ formatTaskDate(task.completedAt) }}</span></div><div v-else-if="task.status === 'failed'" class="history-task-error">{{ task.error || '下载失败，可重试。' }}</div><div v-else class="history-task-meta"><span>已取消</span><i></i><span>{{ formatTaskDate(task.completedAt) }}</span></div></div><button v-if="task.status === 'completed'" class="outline-button task-open-button" @click="openTaskLocation(task)"><FolderOpen :size="14" />打开位置</button><button v-if="task.status === 'failed'" class="retry-button" @click="retryTask(task)"><RefreshCw :size="14" />重试</button></div>
+              <div v-if="!historyTasks.length" class="empty-state task-empty"><div class="empty-state-icon"><History :size="19" /></div><strong>暂无已完成的记录</strong><span>完成或失败的下载会保留在这里。</span></div>
+            </div>
           </div>
-          <div class="task-footnote"><Zap :size="14" /><span>一次只运行一个 BBDownNext 下载进程；取消当前任务后会自动继续队列，未确认归属的临时文件不会自动删除。</span></div>
         </section>
 
         <section v-else-if="page === 'transcripts'" class="page-content transcripts-page">
