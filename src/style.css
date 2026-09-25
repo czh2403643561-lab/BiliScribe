@@ -498,5 +498,58 @@ h1 { margin: 0; color: #1d2b3c; font-size: 23px; font-weight: 700; letter-spacin
   .settings-layout { grid-template-columns: 1fr; }
   .settings-nav { position: static; display: flex; align-items: center; gap: 7px; overflow-x: auto; }
   .settings-nav-label, .settings-nav-divider, .settings-nav-help { display: none; }
-  .settings-nav-item { flex: 0 0 auto; }
+.settings-nav-item { flex: 0 0 auto; }
+}
+
+.creator-search { display: flex; width: 190px; height: 29px; flex: 0 0 auto; align-items: center; gap: 6px; margin-left: auto; padding: 0 8px; border: 1px solid #e9edf1; border-radius: 6px; background: #fbfcfd; color: #9aa5b1; }
+.creator-search:focus-within { border-color: #9dcbea; background: #fff; }
+.creator-search input { width: 100%; min-width: 0; border: 0; outline: none; background: transparent; color: #56657a; font-size: 9px; }
+.creator-search input::placeholder { color: #aab3bd; }
+.creator-search button { display: grid; width: 19px; height: 19px; flex: 0 0 auto; place-items: center; border: 0; border-radius: 4px; background: transparent; color: #9ba6b1; cursor: pointer; }
+.creator-search button:hover { background: #eff3f6; }
+.text-action small { color: #91a0ae; font-size: 8px; }
+.selection-success { margin-left: auto; color: #299668; font-size: 9px; font-weight: 600; }
+.selection-success span { color: #6b9d84; font-weight: 500; }
+.empty-state { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; min-height: 184px; padding: 27px 20px; border: 1px dashed #e4eaf0; border-radius: 10px; background: #fbfcfd; color: #909baa; text-align: center; }
+.empty-state-icon { display: grid; width: 36px; height: 36px; place-items: center; border-radius: 11px; background: #f0f5f8; color: #7c95a7; }
+.empty-state > strong { color: #526176; font-size: 11px; font-weight: 600; }
+.empty-state > span { max-width: 360px; color: #99a4b0; font-size: 9px; line-height: 1.6; }
+.empty-state .empty-retry { margin-top: 4px; }
+.parse-state { margin-top: 15px; }
+.parse-loading .empty-state-icon { background: #eef7ff; color: #2285ca; }
+.search-empty { min-height: 180px; margin: 12px 15px 15px; border-color: transparent; background: #fcfdfe; }
+.task-empty { min-height: 245px; border: 0; background: #fff; }
+.transcript-no-results { min-height: 180px; margin: 10px 6px; padding: 15px 8px; border: 0; background: transparent; }
+.transcript-no-results .empty-state-icon { width: 30px; height: 30px; }
+.transcript-no-results > strong { font-size: 9px; }
+.transcript-no-results > span { max-width: 150px; font-size: 8px; }
+.transcript-page-empty { min-height: 440px; }
+.api-empty-state { min-height: 99px; flex-direction: row; justify-content: flex-start; gap: 10px; margin-top: 10px; padding: 12px; border-style: solid; background: #fbfcfd; text-align: left; }
+.api-empty-state .empty-state-icon { width: 30px; height: 30px; flex: 0 0 auto; border-radius: 8px; }
+.api-empty-state > strong { color: #617084; font-size: 9px; }
+.api-empty-state > span { flex: 1; font-size: 8px; }
+.remove-button, .retry-button { display: inline-flex; height: 27px; flex: 0 0 auto; align-items: center; gap: 5px; padding: 0 8px; border: 1px solid #e7ebef; border-radius: 6px; background: #fff; color: #8a96a3; cursor: pointer; font-size: 8px; }
+.remove-button:hover { border-color: #f0d7d4; background: #fff9f8; color: #c8746f; }
+.retry-button { border-color: #d9e9f5; color: #4386ae; }
+.retry-button:hover { background: #f3f9fd; color: #087ad9; }
+.key-visibility { display: grid; width: 25px; height: 25px; flex: 0 0 auto; place-items: center; border: 0; border-radius: 5px; background: transparent; color: #9aa5b1; cursor: pointer; }
+.key-visibility:hover { background: #f1f4f6; color: #5d7184; }
+.unsaved-pill { display: inline-flex; align-items: center; gap: 4px; margin: 17px 9px 0 auto; padding: 4px 7px; border: 1px solid #f2e2c4; border-radius: 11px; background: #fffaf0; color: #b5893f; font-size: 8px; white-space: nowrap; }
+.unsaved-pill::before { width: 5px; height: 5px; border-radius: 50%; background: #d9a447; content: ''; }
+.confirm-modal { position: relative; width: min(100%, 370px); padding: 24px; }
+.confirm-modal-icon { display: grid; width: 38px; height: 38px; place-items: center; border-radius: 11px; background: #fff6e8; color: #bd8b38; }
+.confirm-modal h2 { margin: 13px 0 6px; color: #2e3c50; font-size: 14px; }
+.confirm-modal p { margin: 0; padding-right: 8px; color: #8d99a7; font-size: 9px; line-height: 1.7; }
+.confirm-actions { display: flex; justify-content: flex-end; gap: 7px; margin-top: 21px; }
+.confirm-danger { background: #d9706b; box-shadow: 0 2px 5px rgba(217, 112, 107, .16); }
+.confirm-danger:hover { background: #c9615d; box-shadow: 0 4px 9px rgba(217, 112, 107, .2); }
+.creator-toolbar { flex-wrap: wrap; padding-top: 8px; padding-bottom: 8px; }
+.selection-line { flex-wrap: wrap; }
+@media (max-width: 1180px) {
+  .creator-search { width: 165px; }
+}
+@media (max-width: 980px) {
+  .creator-search { width: 100%; margin: 3px 0 0; }
+  .creator-toolbar { padding-top: 8px; padding-bottom: 8px; }
+  .unsaved-pill { margin-left: auto; }
 }
