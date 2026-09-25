@@ -302,6 +302,20 @@ function exportTranscript() {
 
 const loginState = ref(false)
 const qrDialog = ref(false)
+const loginAccount = ref(null)
+const loginLoading = ref(false)
+const qrStarting = ref(false)
+const qrImage = ref('')
+const qrSessionId = ref('')
+const qrStatus = ref('idle')
+const qrMessage = ref('')
+const qrStartedLoggedOut = ref(true)
+const logoutConfirm = ref(false)
+let qrPollTimer
+const qrStatusLabel = computed(() => ({
+  idle: '准备生成二维码', loading: '正在生成二维码…', waitingScan: '等待扫码',
+  waitingConfirm: '已扫码，请在手机上确认', success: '登录成功', expired: '二维码已过期', failed: '登录失败',
+}[qrStatus.value] || '等待扫码'))
 const confirmationDialog = computed(() => !!confirmation.value)
 const apiKey = ref('')
 const showApiKey = ref(false)
@@ -326,6 +340,116 @@ function saveSettings() {
   savedTranscriptPath.value = transcriptPath.value
   notify('设置已保存到当前演示会话')
 }
+
+async function refreshLoginStatus() {
+  loginLoading.value = true
+  try {
+    const response = await fetch('/api/bilibili/login')
+    if (!response.ok) throw new Error('登录状态读取失败')
+    const result = await response.json()
+    loginState.value = !!result.loggedIn
+    loginAccount.value = result.account || null
+  } catch {
+    loginState.value = false
+    loginAccount.value = null
+  } finally {
+    loginLoading.value = false
+  }
+}
+
+function stopQrPolling() {
+  clearInterval(qrPollTimer)
+  qrPollTimer = undefined
+}
+
+function closeQrDialog() {
+  stopQrPolling()
+  qrDialog.value = false
+}
+
+async function startQrLogin() {
+  stopQrPolling()
+  qrStarting.value = true
+  qrImage.value = ''
+  qrSessionId.value = ''
+  qrStatus.value = 'loading'
+  qrMessage.value = ''
+  try {
+    const response = await fetch('/api/bilibili/login/qr', { method: 'POST' })
+    const result = await response.json()
+    if (!response.ok) throw new Error(result.error?.message || '二维码生成失败，请重试。')
+    qrImage.value = result.qrDataUrl
+    qrSessionId.value = result.sessionId
+    qrStatus.value = 'waitingScan'
+    qrPollTimer = setInterval(pollQrLogin, 1800)
+  } catch (error) {
+    qrStatus.value = 'failed'
+    qrMessage.value = error.message || '二维码生成失败，请检查本地服务后重试。'
+  } finally {
+    qrStarting.value = false
+  }
+}
+
+async function openQrDialog() {
+  qrStartedLoggedOut.value = !loginState.value
+  qrDialog.value = true
+  await startQrLogin()
+}
+
+async function pollQrLogin() {
+  if (!qrSessionId.value || qrStarting.value) return
+  try {
+    const response = await fetch(`/api/bilibili/login/qr/${qrSessionId.value}`)
+    const result = await response.json()
+    if (!response.ok) throw new Error(result.error?.message || '扫码状态读取失败。')
+    qrStatus.value = result.state || 'failed'
+    qrMessage.value = result.message || ''
+    if (result.state === 'success') {
+      stopQrPolling()
+      await refreshLoginStatus()
+      if (result.account?.name && !loginAccount.value?.name) loginAccount.value = result.account
+      notify(loginAccount.value?.name ? `已登录：${loginAccount.value.name}` : 'B 站登录成功')
+      setTimeout(() => { if (qrDialog.value) closeQrDialog() }, 900)
+    } else if (['expired', 'failed'].includes(result.state)) {
+      stopQrPolling()
+      await refreshLoginStatus()
+      if (qrStartedLoggedOut.value && loginState.value) {
+        qrStatus.value = 'success'
+        qrMessage.value = '已从本机保存的登录状态恢复。'
+        notify(loginAccount.value?.name ? `已登录：${loginAccount.value.name}` : 'B 站登录成功')
+        setTimeout(() => { if (qrDialog.value) closeQrDialog() }, 900)
+      }
+    }
+  } catch (error) {
+    stopQrPolling()
+    await refreshLoginStatus()
+    if (qrStartedLoggedOut.value && loginState.value) {
+      qrStatus.value = 'success'
+      qrMessage.value = '已从本机保存的登录状态恢复。'
+      notify(loginAccount.value?.name ? `已登录：${loginAccount.value.name}` : 'B 站登录成功')
+      setTimeout(() => { if (qrDialog.value) closeQrDialog() }, 900)
+    } else {
+      qrStatus.value = 'failed'
+      qrMessage.value = error.message || '扫码状态读取失败，请刷新二维码重试。'
+    }
+  }
+}
+
+async function logoutBilibili() {
+  try {
+    const response = await fetch('/api/bilibili/logout', { method: 'POST' })
+    const result = await response.json()
+    if (!response.ok) throw new Error(result.error?.message || '退出登录失败。')
+    loginState.value = false
+    loginAccount.value = null
+    logoutConfirm.value = false
+    notify('已退出 B 站登录')
+  } catch (error) {
+    logoutConfirm.value = false
+    notify(error.message || '退出登录失败，请稍后重试')
+  }
+}
+
 function testApi() {
   if (!apiKey.value.trim()) { apiTested.value = false; notify('请先填写 MiMo API Key'); return }
   apiTesting.value = true
@@ -416,8 +540,8 @@ async function openLogDirectory() {
   }
 }
 
-onMounted(() => { progressTimer = setInterval(advanceProgress, 900); refreshBackendStatus() })
-onUnmounted(() => { clearInterval(progressTimer); clearTimeout(toastTimer) })
+onMounted(() => { progressTimer = setInterval(advanceProgress, 900); refreshBackendStatus(); refreshLoginStatus() })
+onUnmounted(() => { clearInterval(progressTimer); clearInterval(qrPollTimer); clearTimeout(toastTimer) })
 </script>
 
 <template>
@@ -530,7 +654,7 @@ onUnmounted(() => { clearInterval(progressTimer); clearTimeout(toastTimer) })
         <section v-else class="page-content settings-page">
           <div class="page-heading"><div><div class="eyebrow">PREFERENCES</div><h1>设置</h1><p>管理登录状态、转写服务和文件保存位置。</p></div><span v-if="settingsDirty" class="unsaved-pill">未保存</span><button class="primary-button save-settings" @click="saveSettings"><Check :size="16" />保存设置</button></div>
           <div class="settings-layout"><aside class="settings-nav panel"><span class="settings-nav-label">偏好设置</span><a class="settings-nav-item active"><UserRound :size="16" />账号与服务</a><a class="settings-nav-item"><FolderOpen :size="16" />文件与目录</a><a class="settings-nav-item"><SlidersIcon />任务处理</a><div class="settings-nav-divider"></div><div class="settings-nav-help"><CircleHelp :size="16" /><span>遇到问题？<small>查看使用说明</small></span><ExternalLink :size="13" /></div></aside><div class="settings-content">
-            <section class="settings-card panel"><div class="settings-card-heading"><div class="settings-heading-icon bilibili-icon">哔</div><div><h2>B 站账号</h2><p>登录后可访问需要登录的视频内容</p></div><span class="settings-status" :class="loginState ? 'ok' : 'off'"><i></i>{{ loginState ? '已登录' : '未登录' }}</span></div><div class="setting-divider"></div><div class="account-row"><div class="account-avatar">{{ loginState ? '山' : 'B' }}<span :class="{ online: loginState }"></span></div><div class="account-info"><strong>{{ loginState ? creator.name : '尚未登录 B 站' }}</strong><span>{{ loginState ? 'UID：349327328' : '扫码登录以使用完整解析能力' }}</span></div><button class="outline-button account-button" @click="qrDialog = true"><ScanLine :size="15" />{{ loginState ? '重新登录' : '扫码登录' }}</button></div><div class="settings-tip"><ShieldCheck :size="15" /><span>登录状态仅保存在本机；扫码登录功能尚未接入。</span></div></section>
+            <section class="settings-card panel"><div class="settings-card-heading"><div class="settings-heading-icon bilibili-icon">哔</div><div><h2>B 站账号</h2><p>登录后可访问需要登录的视频内容</p></div><span class="settings-status" :class="loginState ? 'ok' : 'off'"><i></i>{{ loginLoading ? '检查中' : loginState ? '已登录' : '未登录' }}</span></div><div class="setting-divider"></div><div class="account-row"><div class="account-avatar"><img v-if="loginAccount?.avatar" :src="loginAccount.avatar" alt="" />{{ loginAccount?.avatar ? '' : loginState ? (loginAccount?.name?.slice(0, 1) || 'B') : 'B' }}<span :class="{ online: loginState }"></span></div><div class="account-info"><strong>{{ loginAccount?.name || (loginState ? 'B 站账号' : '尚未登录 B 站') }}</strong><span>{{ loginAccount?.uid ? `UID：${loginAccount.uid}` : loginState ? '已使用本机保存的登录状态' : '扫码登录以使用完整解析能力' }}</span></div><button class="outline-button account-button" @click="openQrDialog"><ScanLine :size="15" />{{ loginState ? '重新登录' : '扫码登录' }}</button><button v-if="loginState" class="outline-button account-button logout-account-button" @click="logoutConfirm = true"><LogOut :size="15" />退出登录</button></div><div class="settings-tip"><ShieldCheck :size="15" /><span>登录凭据仅保存在本机，并由 BBDownNext 管理；公开视频仍可在未登录时解析。</span></div></section>
             <section class="settings-card panel"><div class="settings-card-heading"><div class="settings-heading-icon model-icon"><Sparkles :size="18" /></div><div><h2>文字稿模型</h2><p>用于将视频音频转换为课程文字稿</p></div><span class="fixed-tag"><LockKeyhole :size="12" />固定模型</span></div><div class="model-field"><label>模型</label><div class="model-select"><span class="model-dot"></span><strong>MiMo V2.6 Flash</strong><span class="model-subtle">快速 · 低成本</span><ChevronDown :size="16" /></div><small>转写结果忠实保留原话，不总结、不重写。</small></div><div class="api-key-field"><div class="api-label"><label for="api-key">MiMo API Key</label><a href="#" @click.prevent="notify('API Key 申请链接为演示内容')">如何获取？<ExternalLink :size="12" /></a></div><div class="api-input-row"><div class="key-input"><KeyRound :size="16" /><input id="api-key" v-model="apiKey" :type="showApiKey ? 'text' : 'password'" autocomplete="off" placeholder="输入你的 API Key" @input="apiTested = false" /><button type="button" class="key-visibility" :aria-label="showApiKey ? '隐藏 API Key' : '显示 API Key'" @click="showApiKey = !showApiKey"><component :is="showApiKey ? EyeOff : Eye" :size="15" /></button></div><button class="outline-button test-api-button" :disabled="apiTesting" @click="testApi"><LoaderCircle v-if="apiTesting" class="spin" :size="15" /><Activity v-else :size="15" />{{ apiTesting ? '测试中' : '测试连接' }}</button></div><div class="api-feedback"><span v-if="apiTested" class="success-text"><Check :size="13" />连接成功（演示）</span><span v-else-if="!apiKey.trim()"><LockKeyhole :size="12" />尚未配置 API Key</span><span v-else-if="settingsDirty"><CircleHelp :size="13" />有未保存的更改</span><span v-else><Check :size="13" />已保存到当前演示会话</span></div><div v-if="!apiKey.trim()" class="empty-state api-empty-state"><div class="empty-state-icon"><KeyRound :size="16" /></div><strong>API 尚未配置</strong><span>填写并保存 API Key 后，才可测试连接。</span></div></div></section>
             <section class="settings-card panel"><div class="settings-card-heading"><div class="settings-heading-icon folder-icon"><FolderOpen :size="18" /></div><div><h2>文件与目录</h2><p>设置下载文件和文字稿的保存位置</p></div></div><div class="setting-divider"></div><div class="path-setting"><div><label>视频与音频目录</label><span>下载完成的媒体文件保存位置</span></div><div class="path-control"><input v-model="downloadPath" aria-label="视频与音频目录" /><button class="outline-button path-button" @click="choosePath('video')"><FolderOpen :size="15" />选择</button></div></div><div class="path-setting"><div><label>文字稿目录</label><span>转写完成后导出的 TXT 文件位置</span></div><div class="path-control"><input v-model="transcriptPath" aria-label="文字稿目录" /><button class="outline-button path-button" @click="choosePath('transcript')"><FolderOpen :size="15" />选择</button></div></div><div class="settings-tip folder-tip"><HardDriveDownload :size="15" /><span>原型中显示的是示例路径，不会读写本机文件。</span></div></section>
             <section class="settings-card compact-settings panel"><div class="settings-card-heading"><div class="settings-heading-icon queue-icon"><ListChecks :size="18" /></div><div><h2>任务队列</h2><p>下载与转写任务使用同一个串行队列</p></div></div><div class="queue-setting-line"><span>同时执行的任务</span><span class="serial-value"><span class="live-dot"></span>1 个任务 <span class="locked-mini"><LockKeyhole :size="11" />第一版固定</span></span></div></section>
@@ -543,7 +667,9 @@ onUnmounted(() => { clearInterval(progressTimer); clearTimeout(toastTimer) })
     <div v-if="page === 'new' && parseState === 'success' && resultType === 'creator' && selectedCount" class="batch-bar"><div class="batch-selection"><div class="batch-selected-icon"><Check :size="16" /></div><div><strong>已选择 {{ selectedCount }} 个视频</strong><small v-if="creatorSearch.trim()">包含当前筛选外的选择</small><button @click="clearAll">清空选择</button></div></div><span class="batch-divider"></span><div class="batch-action-select"><span>添加为</span><button v-for="mode in modeOptions" :key="mode.id" :class="{ active: batchAction === mode.id }" @click="batchAction = mode.id"><component :is="mode.icon" :size="15" />{{ mode.label }}<span class="radio-dot"><i></i></span></button></div><button class="primary-button batch-create" @click="createTasks"><Plus :size="16" />创建 {{ selectedCount }} 个任务</button></div>
 
     <div v-if="confirmationDialog" class="modal-backdrop" @click.self="confirmation = null"><div class="confirm-modal panel" role="dialog" aria-modal="true" :aria-label="confirmationTitle"><button class="icon-button modal-close" aria-label="关闭" @click="confirmation = null"><X :size="18" /></button><div class="confirm-modal-icon"><CircleHelp :size="20" /></div><h2>{{ confirmationTitle }}</h2><p>{{ confirmationMessage }}</p><div class="confirm-actions"><button class="outline-button" @click="confirmation = null">返回</button><button class="primary-button confirm-danger" @click="confirmAction">{{ confirmation?.type === 'clear-history' ? '清除历史' : '确认取消' }}</button></div></div></div>
-    <div v-if="qrDialog" class="modal-backdrop" @click.self="qrDialog = false"><div class="login-modal panel"><button class="icon-button modal-close" aria-label="关闭" @click="qrDialog = false"><X :size="18" /></button><div class="login-modal-icon"><ScanLine :size="22" /></div><h2>扫码登录 B 站</h2><p>打开哔哩哔哩 App，扫描二维码完成登录</p><div class="fake-qr" aria-label="演示二维码"><span v-for="cell in 81" :key="cell" :class="{ dark: [1,2,3,4,9,13,17,18,19,21,23,25,27,29,31,33,35,37,39,41,43,45,47,49,51,53,55,57,59,61,63,65,67,69,71,73,75,77,78,79,80,81].includes(cell) }"></span><div class="qr-center">B</div></div><div class="qr-note"><span class="live-dot"></span>等待扫码 · 演示状态</div><button class="primary-button simulate-login" @click="loginState = true; qrDialog = false; notify('已模拟扫码登录成功')"><Check :size="16" />模拟扫码成功</button><small class="modal-disclaimer">仅改变界面状态，不会连接 B 站</small></div></div>
+    <div v-if="qrDialog" class="modal-backdrop" @click.self="closeQrDialog"><div class="login-modal panel" role="dialog" aria-modal="true" aria-label="扫码登录 B 站"><button class="icon-button modal-close" aria-label="关闭" @click="closeQrDialog"><X :size="18" /></button><div class="login-modal-icon"><ScanLine :size="22" /></div><h2>扫码登录 B 站</h2><p>打开哔哩哔哩 App，扫描二维码完成登录</p><div class="real-qr" :class="{ 'qr-is-loading': qrStarting }"><img v-if="qrImage" :src="qrImage" alt="B 站登录二维码" /><div v-else class="qr-placeholder"><LoaderCircle v-if="qrStarting" class="spin" :size="24" /><ScanLine v-else :size="24" /></div></div><div class="qr-note" :class="`qr-${qrStatus}`"><span class="live-dot"></span>{{ qrStatusLabel }}</div><p v-if="qrMessage" class="qr-error-message">{{ qrMessage }}</p><button v-if="['expired', 'failed'].includes(qrStatus)" class="primary-button simulate-login" :disabled="qrStarting" @click="startQrLogin"><RefreshCw :size="16" />刷新二维码</button><small class="modal-disclaimer">登录信息仅保存在本机，不会发送给 BiliScribe 服务之外的站点。</small></div></div>
+
+    <div v-if="logoutConfirm" class="modal-backdrop" @click.self="logoutConfirm = false"><div class="confirm-modal panel" role="dialog" aria-modal="true" aria-label="确认退出 B 站登录"><button class="icon-button modal-close" aria-label="关闭" @click="logoutConfirm = false"><X :size="18" /></button><div class="confirm-modal-icon"><LogOut :size="20" /></div><h2>退出 B 站登录？</h2><p>本机保存的 B 站登录状态将被移除，公开视频仍可解析。</p><div class="confirm-actions"><button class="outline-button" @click="logoutConfirm = false">返回</button><button class="primary-button confirm-danger" @click="logoutBilibili">退出登录</button></div></div></div>
 
     <Transition name="toast"><div v-if="toast" class="toast-message"><Check :size="15" />{{ toast }}</div></Transition>
   </div>

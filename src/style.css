@@ -836,3 +836,15 @@ h1 { color: #1f2e42; font-size: 26px; letter-spacing: -.45px; }
 .api-empty-state > strong { font-size: 13px; }
 .api-empty-state > span { font-size: 12px; }
 .unsaved-pill { font-size: 12px; }
+
+.account-avatar { position: relative; overflow: hidden; }
+.account-avatar img { width: 100%; height: 100%; border-radius: inherit; object-fit: cover; }
+.logout-account-button { margin-left: -4px; }
+.real-qr { display: grid; width: 216px; height: 216px; place-items: center; margin: 18px auto 12px; border: 1px solid #e4e9ed; border-radius: 8px; background: #fff; }
+.real-qr img { display: block; width: 200px; height: 200px; image-rendering: pixelated; }
+.qr-placeholder { display: grid; width: 200px; height: 200px; place-items: center; background: #f5f7f8; color: #8190a0; }
+.qr-note.qr-waitingConfirm { color: #aa7a25; }
+.qr-note.qr-success { color: #21865c; }
+.qr-note.qr-expired, .qr-note.qr-failed { color: #bd5d57; }
+.qr-error-message { margin: -3px 0 10px !important; color: #bd5d57 !important; }
+.modal-disclaimer { display: block; margin-top: 15px; color: #66778a; font-size: 12px; line-height: 1.5; }
