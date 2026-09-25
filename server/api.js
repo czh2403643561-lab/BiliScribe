@@ -4,7 +4,7 @@ import path from 'node:path'
 import { spawn, spawnSync } from 'node:child_process'
 import net from 'node:net'
 import os from 'node:os'
-import { randomBytes, randomUUID } from 'node:crypto'
+import { createHash, randomBytes, randomUUID } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 import { getLogDirectory, getLogPath, log, readCompleteLog, readRecentLogLines } from './logger.js'
 
@@ -26,6 +26,8 @@ const stateDirectory = path.join(projectRoot, '.biliscribe')
 const stateFile = path.join(stateDirectory, 'state.json')
 const defaultDownloadDirectory = path.join(os.homedir(), 'Videos', 'BiliScribe')
 const mediaExtensions = new Set(['.mp4', '.mkv', '.flv', '.m4a', '.mka', '.mp3', '.aac', '.wav', '.flac', '.m4s'])
+const bilibiliImageHosts = ['hdslb.com', 'bilivideo.com']
+const wbiMixinIndices = [46, 47, 18, 2, 53, 8, 23, 32, 15, 50, 10, 31, 58, 3, 45, 35, 27, 43, 5, 49, 33, 9, 42, 19, 29, 28, 14, 39, 12, 38, 41, 13, 37, 48, 7, 16, 24, 55, 40, 61, 26, 17, 0, 1, 60, 51, 30, 4, 22, 25, 54, 21, 56, 59, 6, 63, 57, 62, 11, 36, 20, 34, 44, 52]
 
 let downloadDirectory = defaultDownloadDirectory
 const downloadTasks = new Map()
@@ -94,6 +96,15 @@ function sendJson(response, statusCode, data) {
 
 function sendError(response, statusCode, code, message) {
   sendJson(response, statusCode, { error: { code, message } })
+}
+
+function proxiedImageUrl(remoteUrl) {
+  if (typeof remoteUrl !== 'string' || !remoteUrl) return ''
+  return `/api/images/proxy?url=${encodeURIComponent(remoteUrl.replace(/^http:/i, 'https:'))}`
+}
+
+function publicAccount(account) {
+  return account ? { ...account, avatar: proxiedImageUrl(account.avatar) } : null
 }
 
 function readSavedWebCookie() {
@@ -267,7 +278,7 @@ async function pollQrLogin(response, id) {
     session.account = status.account
     log('info', 'Bilibili login verified after QR credential update', { hasAccountName: !!session.account?.name })
     log('info', 'Bilibili QR success', { hasAccountName: !!session.account?.name })
-    sendJson(response, 200, { state: 'success', account: session.account })
+    sendJson(response, 200, { state: 'success', account: publicAccount(session.account) })
     return true
   }
   if (session.expiresAt <= Date.now()) {
@@ -277,7 +288,7 @@ async function pollQrLogin(response, id) {
     return
   }
   if (session.state === 'success') {
-    sendJson(response, 200, { state: 'success', account: session.account })
+    sendJson(response, 200, { state: 'success', account: publicAccount(session.account) })
     return
   }
   try {
@@ -315,7 +326,7 @@ async function pollQrLogin(response, id) {
       session.state = 'success'
       log('info', 'Bilibili login verified', { hasAccountName: !!session.account?.name })
       log('info', 'Bilibili QR success', { hasAccountName: !!session.account?.name })
-      sendJson(response, 200, { state: 'success', account: session.account })
+      sendJson(response, 200, { state: 'success', account: publicAccount(session.account) })
       return
     }
     session.state = ['waitingScan', 'waitingConfirm', 'expired', 'failed'].includes(nextState) ? nextState : 'waitingScan'
@@ -353,7 +364,7 @@ async function logoutBilibili(response) {
   }
 }
 
-async function readJsonBody(request) {
+async function readJsonBody(request, maxBytes = 16 * 1024) {
   if (!request.headers['content-type']?.toLowerCase().includes('application/json')) {
     throw Object.assign(new Error('请求必须使用 JSON 格式。'), { statusCode: 415, code: 'unsupported_media_type' })
   }
@@ -361,7 +372,7 @@ async function readJsonBody(request) {
   let byteLength = 0
   for await (const chunk of request) {
     byteLength += chunk.length
-    if (byteLength > 16 * 1024) throw Object.assign(new Error('请求内容过大。'), { statusCode: 413, code: 'payload_too_large' })
+    if (byteLength > maxBytes) throw Object.assign(new Error('请求内容过大。'), { statusCode: 413, code: 'payload_too_large' })
     chunks.push(chunk)
   }
   try { return JSON.parse(Buffer.concat(chunks).toString('utf8')) } catch {
@@ -474,6 +485,263 @@ async function fetchPublicVideoDetails(bvid) {
   const result = await response.json()
   if (result.code !== 0 || !result.data) throw new Error(`视频信息服务返回错误码 ${result.code ?? 'unknown'}`)
   return result.data
+}
+
+let cachedWbiKey = ''
+let cachedWbiKeyAt = 0
+
+function bilibiliHeaders(mid) {
+  const headers = {
+    Accept: 'application/json',
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+    Referer: `https://space.bilibili.com/${mid}`,
+    Origin: 'https://space.bilibili.com',
+  }
+  const cookie = readSavedWebCookie()
+  if (cookie) headers.Cookie = cookie
+  return headers
+}
+
+async function getWbiKey(mid) {
+  if (cachedWbiKey && Date.now() - cachedWbiKeyAt < 6 * 60 * 60 * 1000) return cachedWbiKey
+  const response = await fetch('https://api.bilibili.com/x/web-interface/nav', {
+    headers: bilibiliHeaders(mid), signal: AbortSignal.timeout(15_000),
+  })
+  if (!response.ok) throw new Error(`B 站主页服务暂时不可用（HTTP ${response.status}）。`)
+  const result = await response.json()
+  const images = result.data?.wbi_img
+  const imageKey = images?.img_url?.split('/').at(-1)?.split('.')[0] || ''
+  const subKey = images?.sub_url?.split('/').at(-1)?.split('.')[0] || ''
+  const raw = imageKey + subKey
+  const key = wbiMixinIndices.map((index) => raw[index] || '').join('').slice(0, 32)
+  if (key.length !== 32) throw new Error('无法读取 B 站主页解析参数，请稍后重试。')
+  cachedWbiKey = key
+  cachedWbiKeyAt = Date.now()
+  return key
+}
+
+function signWbiParams(params, key) {
+  const sorted = Object.entries(params).sort(([left], [right]) => left.localeCompare(right))
+  const query = sorted.map(([name, value]) => `${encodeURIComponent(name)}=${encodeURIComponent(String(value).replace(/[!'()*]/g, ''))}`).join('&')
+  return `${query}&w_rid=${createHash('md5').update(`${query}${key}`).digest('hex')}`
+}
+
+async function fetchBilibiliJson(endpoint, mid) {
+  const response = await fetch(endpoint, {
+    headers: bilibiliHeaders(mid), signal: AbortSignal.timeout(15_000),
+  })
+  if (!response.ok) throw new Error(`B 站主页服务暂时不可用（HTTP ${response.status}）。`)
+  const result = await response.json()
+  if (result.code !== 0) {
+    if (result.code === -101 || result.code === -111) {
+      throw Object.assign(new Error('B 站登录状态已失效，请在设置中重新扫码登录后重试。'), { statusCode: 401, code: 'bilibili_login_expired' })
+    }
+    throw Object.assign(new Error(`B 站主页解析失败（错误码 ${result.code}），请稍后重试。`), { code: `bilibili_${Math.abs(Number(result.code)) || 'api'}_error` })
+  }
+  if (!result.data) throw new Error('B 站主页没有返回可用信息。')
+  return result.data
+}
+
+async function mapWithConcurrency(items, limit, mapper) {
+  const output = new Array(items.length)
+  let nextIndex = 0
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (nextIndex < items.length) {
+      const index = nextIndex++
+      output[index] = await mapper(items[index], index)
+    }
+  }))
+  return output
+}
+
+function mapCreatorVideo(archive, ownerName = '') {
+  const bvid = String(archive?.bvid || '')
+  if (!/^BV[0-9A-Za-z]{10}$/i.test(bvid)) return null
+  const durationValue = archive.duration ?? archive.length ?? 0
+  const durationSeconds = typeof durationValue === 'string' && durationValue.includes(':')
+    ? durationValue.split(':').reverse().reduce((total, part, index) => total + (Number(part) || 0) * 60 ** index, 0)
+    : Number(durationValue) || 0
+  const created = Number(archive.pubdate ?? archive.ctime ?? archive.created) || 0
+  const cover = String(archive.pic || archive.cover || '').replace(/^http:/i, 'https:')
+  return {
+    id: bvid, bvid, title: String(archive.title || bvid), duration: formatDuration(durationSeconds),
+    date: created ? new Date(created * 1000).toLocaleDateString('zh-CN', { month: '2-digit', day: '2-digit' }) : '',
+    views: Number(archive.stat?.view ?? archive.play) || 0,
+    cover: proxiedImageUrl(cover), url: `https://www.bilibili.com/video/${bvid}/`, owner: String(archive.author || archive.owner?.name || ownerName),
+  }
+}
+
+async function parseCreatorHomepage(request, response) {
+  const body = await readJsonBody(request)
+  let input
+  try { input = new URL(String(body.url || '').trim()) } catch {
+    throw Object.assign(new Error('请输入有效的 B 站 UP 主主页链接。'), { statusCode: 400, code: 'invalid_url' })
+  }
+  const mid = input.hostname.toLowerCase() === 'space.bilibili.com' ? input.pathname.match(/^\/(\d+)(?:\/|$)/)?.[1] : null
+  if (!['http:', 'https:'].includes(input.protocol) || !mid) {
+    throw Object.assign(new Error('目前只支持 B 站 UP 主主页链接。'), { statusCode: 400, code: 'unsupported_url' })
+  }
+  const startedAt = Date.now()
+  log('info', 'Creator parse started', { mid })
+  try {
+    const profilePromise = fetchBilibiliJson(`https://api.bilibili.com/x/web-interface/card?mid=${mid}`, mid)
+    const wbiKeyPromise = getWbiKey(mid)
+    const collectionListPromise = (async () => {
+      const collections = []
+      const pageSize = 20
+      let pageNum = 1
+      let total = 0
+      do {
+        const data = await fetchBilibiliJson(`https://api.bilibili.com/x/polymer/web-space/seasons_series_list?mid=${mid}&page_num=${pageNum}&page_size=${pageSize}`, mid)
+        const list = data.items_lists || {}
+        const items = [...(list.seasons_list || []).map((item) => ({ ...item, kind: 'collection' })), ...(list.series_list || []).map((item) => ({ ...item, kind: 'series' }))]
+        collections.push(...items)
+        total = Number(list.page?.total) || items.length
+        if (!items.length || pageNum * pageSize >= total) break
+        pageNum += 1
+      } while (pageNum <= 100)
+      return { collections, pages: pageNum }
+    })()
+    const [profileData, wbiKey, collectionResult] = await Promise.all([profilePromise, wbiKeyPromise, collectionListPromise])
+    const profile = profileData.card || {}
+    if (!profile.mid) throw new Error('B 站没有返回此 UP 主的基本资料。')
+    const name = String(profile.name || '未知 UP 主')
+
+    const posts = []
+    const postPageSize = 30
+    let postPage = 1
+    let postTotal = 0
+    do {
+      const params = {
+        mid, pn: postPage, ps: postPageSize, order: 'pubdate', platform: 'web',
+        web_location: '1550101', order_avoided: 'true', wts: Math.floor(Date.now() / 1000),
+      }
+      const query = signWbiParams(params, wbiKey)
+      const data = await fetchBilibiliJson(`https://api.bilibili.com/x/space/wbi/arc/search?${query}`, mid)
+      const page = data.page || {}
+      postTotal = Number(page.count) || 0
+      const items = data.list?.vlist || []
+      posts.push(...items)
+      if (!items.length || postPage * postPageSize >= postTotal) break
+      postPage += 1
+    } while (postPage <= 1000)
+
+    const loadedCollections = await mapWithConcurrency(collectionResult.collections, 4, async (item) => {
+      const meta = item.meta || {}
+      const isSeries = item.kind === 'series'
+      const itemId = String(isSeries ? meta.series_id : meta.season_id || meta.id || '')
+      if (!/^\d+$/.test(itemId)) return null
+      const videos = []
+      const pageSize = 30
+      let pageNum = 1
+      let total = Number(meta.total) || item.archives?.length || 0
+      do {
+        const endpoint = isSeries
+          ? `https://api.bilibili.com/x/series/archives?mid=${mid}&series_id=${itemId}&only_normal=true&sort=desc&pn=${pageNum}&ps=${pageSize}`
+          : `https://api.bilibili.com/x/polymer/web-space/seasons_archives_list?mid=${mid}&season_id=${itemId}&page_num=${pageNum}&page_size=${pageSize}`
+        const data = await fetchBilibiliJson(endpoint, mid)
+        const archives = data.archives || []
+        total = Number(data.page?.total) || total || archives.length
+        videos.push(...archives.map((archive) => mapCreatorVideo(archive, name)).filter(Boolean))
+        if (!archives.length || videos.length >= total) break
+        pageNum += 1
+      } while (pageNum <= 1000)
+      return {
+        id: `${item.kind}-${itemId}`, kind: item.kind, title: String(meta.name || `${isSeries ? '系列' : '合集'} ${itemId}`),
+        owner: name, total, videos, cover: videos[0]?.cover || proxiedImageUrl(meta.cover || ''),
+      }
+    })
+
+    const groups = loadedCollections.filter(Boolean)
+    const groupedIds = new Set(groups.flatMap((group) => group.videos.map((video) => video.bvid)))
+    const postsMapped = posts.map((archive) => mapCreatorVideo(archive, name)).filter(Boolean)
+    const uniqueVideos = new Map()
+    for (const video of postsMapped) uniqueVideos.set(video.bvid, video)
+    for (const group of groups) for (const video of group.videos) if (!uniqueVideos.has(video.bvid)) uniqueVideos.set(video.bvid, video)
+    const others = postsMapped.filter((video) => !groupedIds.has(video.bvid))
+    if (others.length) groups.push({ id: 'other-videos', kind: 'other', title: '其他视频', owner: name, total: others.length, videos: others, cover: others[0].cover })
+    const creator = {
+      uid: String(profile.mid), name, avatar: proxiedImageUrl(profile.face || ''),
+      description: String(profile.sign || ''), videoCount: postTotal || postsMapped.length,
+      collectionCount: loadedCollections.filter(Boolean).length, followers: Number(profile.fans) || 0,
+      resultCount: uniqueVideos.size, groups, videos: [...uniqueVideos.values()],
+    }
+    log('info', 'Creator parse succeeded', {
+      mid, postPages: postPage, videoCount: creator.videoCount, resultVideoCount: creator.resultCount,
+      collectionPages: collectionResult.pages, collectionCount: creator.collectionCount, durationMs: Date.now() - startedAt,
+    })
+    sendJson(response, 200, { creator })
+  } catch (error) {
+    log(error.statusCode === 401 ? 'warn' : 'error', 'Creator parse failed', {
+      mid, code: error.code || 'creator_parse_failed', message: error.message, durationMs: Date.now() - startedAt,
+    })
+    sendError(response, error.statusCode || 502, error.code || 'creator_parse_failed', error.message || 'UP 主主页解析失败，请稍后重试。')
+  }
+}
+
+function isBilibiliImageHost(hostname) {
+  return bilibiliImageHosts.some((domain) => hostname === domain || hostname.endsWith(`.${domain}`))
+}
+
+async function proxyBilibiliImage(request, response) {
+  let target
+  try { target = new URL(new URL(request.url, 'http://127.0.0.1').searchParams.get('url') || '') } catch {
+    sendError(response, 400, 'invalid_image_url', '图片地址无效。')
+    return
+  }
+  if (target.protocol !== 'https:' || target.port && target.port !== '443' || target.username || target.password || !isBilibiliImageHost(target.hostname.toLowerCase())) {
+    sendError(response, 403, 'image_host_not_allowed', '只允许加载 B 站图片资源。')
+    return
+  }
+  try {
+    let remote = await fetch(target, {
+      headers: { Referer: 'https://www.bilibili.com/', 'User-Agent': 'Mozilla/5.0 BiliScribe/0.1', Accept: 'image/avif,image/webp,image/apng,image/*,*/*;q=0.8' },
+      redirect: 'manual', signal: AbortSignal.timeout(12_000),
+    })
+    for (let redirects = 0; remote.status >= 300 && remote.status < 400 && redirects < 3; redirects++) {
+      const location = remote.headers.get('location')
+      if (!location) break
+      const redirected = new URL(location, target)
+      if (redirected.protocol !== 'https:' || !isBilibiliImageHost(redirected.hostname.toLowerCase())) break
+      target = redirected
+      remote = await fetch(target, {
+        headers: { Referer: 'https://www.bilibili.com/', 'User-Agent': 'Mozilla/5.0 BiliScribe/0.1', Accept: 'image/avif,image/webp,image/apng,image/*,*/*;q=0.8' },
+        redirect: 'manual', signal: AbortSignal.timeout(12_000),
+      })
+    }
+    const contentType = (remote.headers.get('content-type') || '').split(';')[0].toLowerCase()
+    const length = Number(remote.headers.get('content-length')) || 0
+    if (!remote.ok || !contentType.startsWith('image/') || contentType === 'image/svg+xml' || length > 12 * 1024 * 1024) {
+      sendError(response, 502, 'image_unavailable', 'B 站图片暂时无法加载。')
+      return
+    }
+    const reader = remote.body?.getReader()
+    if (!reader) {
+      sendError(response, 502, 'image_unavailable', 'B 站图片暂时无法加载。')
+      return
+    }
+    const chunks = []
+    let byteLength = 0
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+      byteLength += value.byteLength
+      if (byteLength > 12 * 1024 * 1024) {
+        await reader.cancel()
+        sendError(response, 502, 'image_too_large', '图片文件过大，无法加载。')
+        return
+      }
+      chunks.push(Buffer.from(value))
+    }
+    const data = Buffer.concat(chunks, byteLength)
+    response.writeHead(200, {
+      'Content-Type': contentType, 'Content-Length': data.length,
+      'Cache-Control': 'public, max-age=21600', 'X-Content-Type-Options': 'nosniff',
+    })
+    response.end(data)
+  } catch {
+    sendError(response, 502, 'image_unavailable', 'B 站图片暂时无法加载。')
+  }
 }
 
 function getDownloadTasks() {
@@ -734,6 +1002,39 @@ async function createDownloadTask(request, response) {
   void pumpDownloadQueue()
 }
 
+async function createBatchDownloadTasks(request, response) {
+  const body = await readJsonBody(request, 2 * 1024 * 1024)
+  if (!['video', 'audio'].includes(body.mode)) {
+    sendError(response, 400, 'invalid_download_mode', '目前只支持批量下载视频或音频。')
+    return
+  }
+  if (!Array.isArray(body.videos) || !body.videos.length || body.videos.length > 3000) {
+    sendError(response, 400, 'invalid_batch', '请选择 1 到 3000 个视频后再创建任务。')
+    return
+  }
+  const normalized = body.videos.map((video) => {
+    if (!video || typeof video !== 'object') throw Object.assign(new Error('批量视频信息无效。'), { statusCode: 400, code: 'invalid_batch_video' })
+    const input = typeof video.url === 'string' && video.url ? video.url : `https://www.bilibili.com/video/${String(video.bvid || '')}/`
+    const result = normalizeVideoUrl(input)
+    return {
+      bvid: result.bvid, url: result.canonicalUrl,
+      title: String(video.title || result.bvid).slice(0, 300),
+      owner: String(video.owner || '未知 UP 主').slice(0, 120),
+    }
+  })
+  const unique = [...new Map(normalized.map((video) => [video.bvid, video])).values()]
+  const tasks = unique.map((video) => ({
+    id: randomUUID(), ...video, mode: body.mode, status: 'waiting', phase: '等待中', progress: null,
+    outputPath: '', outputDirectory: '', outputFiles: [], fileSize: 0, error: '',
+    createdAt: new Date().toISOString(), completedAt: null, attempt: 0,
+  }))
+  for (const task of tasks) downloadTasks.set(task.id, task)
+  saveLocalState()
+  log('info', 'Creator batch download tasks created', { count: tasks.length, mode: body.mode })
+  sendJson(response, 201, { tasks: tasks.map(({ id, bvid, title, owner, mode, status, createdAt }) => ({ id, bvid, title, owner, mode, status, createdAt })) })
+  void pumpDownloadQueue()
+}
+
 async function saveDownloadDirectory(request, response) {
   const body = await readJsonBody(request)
   if (typeof body.downloadDirectory !== 'string' || !body.downloadDirectory.trim()) {
@@ -765,6 +1066,10 @@ async function handleTaskAction(request, response, method, pathname) {
   }
   if (pathname === '/api/tasks' && method === 'POST') {
     await createDownloadTask(request, response)
+    return
+  }
+  if (pathname === '/api/tasks/batch' && method === 'POST') {
+    await createBatchDownloadTasks(request, response)
     return
   }
   if (pathname === '/api/tasks/history' && method === 'DELETE') {
@@ -809,14 +1114,19 @@ async function handleTaskAction(request, response, method, pathname) {
       sendError(response, 404, 'output_not_found', '下载文件已不存在，请检查保存目录。')
       return true
     }
-    const target = fs.statSync(task.outputPath).isFile() ? `/select,${task.outputPath}` : task.outputPath
-    const explorer = spawn('explorer.exe', [target], { detached: true, stdio: 'ignore', windowsHide: false })
+    const outputStats = fs.statSync(task.outputPath)
+    const isFile = outputStats.isFile()
+    const target = isFile ? `/select,${path.resolve(task.outputPath)}` : path.resolve(task.outputPath)
+    const explorer = spawn('explorer.exe', [target], {
+      cwd: isFile ? path.dirname(path.resolve(task.outputPath)) : path.resolve(task.outputPath),
+      detached: true, stdio: 'ignore', windowsHide: false,
+    })
     await new Promise((resolve, reject) => {
       explorer.once('spawn', resolve)
       explorer.once('error', reject)
     })
     explorer.unref()
-    sendJson(response, 200, { opened: true })
+    sendJson(response, 200, { opened: true, located: isFile })
     return true
   }
   if (method === 'POST' && action === 'retry' && task.status === 'failed') {
@@ -905,7 +1215,7 @@ async function parseSingleVideo(request, response) {
       duration: durationSeconds ? formatDuration(durationSeconds) : cliMetadata.durationText,
       date: details?.pubdate ? new Date(details.pubdate * 1000).toLocaleDateString('zh-CN') : '',
       views: Number.isFinite(details?.stat?.view) ? details.stat.view : null,
-      cover: details?.pic?.replace(/^http:/i, 'https:') || '',
+      cover: proxiedImageUrl(details?.pic || ''),
       url: canonicalUrl,
     }
     log('info', 'Video parse succeeded', { bvid, durationMs: Date.now() - startedAt, hasCover: !!video.cover })
@@ -933,8 +1243,14 @@ const server = http.createServer(async (request, response) => {
         logPath: getLogPath(),
         logDirectory: getLogDirectory(),
       })
+    } else if (method === 'GET' && pathname === '/api/images/proxy') {
+      await proxyBilibiliImage(request, response)
+      statusCode = response.statusCode || 200
     } else if (method === 'POST' && pathname === '/api/videos/parse') {
       await parseSingleVideo(request, response)
+      statusCode = response.statusCode || 200
+    } else if (method === 'POST' && pathname === '/api/creators/parse') {
+      await parseCreatorHomepage(request, response)
       statusCode = response.statusCode || 200
     } else if (method === 'GET' && pathname === '/api/settings/download') {
       sendJson(response, 200, { downloadDirectory })
@@ -950,7 +1266,7 @@ const server = http.createServer(async (request, response) => {
     } else if (method === 'GET' && pathname === '/api/bilibili/login') {
       const login = await getLoginStatus()
       if (login.loggedIn) log('info', 'Bilibili login status restored', { hasAccountName: !!login.account?.name })
-      sendJson(response, 200, { loggedIn: login.loggedIn, account: login.account })
+      sendJson(response, 200, { loggedIn: login.loggedIn, account: publicAccount(login.account) })
     } else if (method === 'POST' && pathname === '/api/bilibili/login/qr') {
       await startQrLogin(response)
       statusCode = response.statusCode || 200

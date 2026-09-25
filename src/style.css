@@ -110,6 +110,8 @@ h1 { margin: 0; color: #1d2b3c; font-size: 23px; font-weight: 700; letter-spacin
 .creator-cover::after { right: 0; bottom: 0; left: 0; height: 1px; background: #edf1f4; }
 .creator-profile { position: relative; z-index: 1; display: flex; align-items: center; gap: 15px; }
 .creator-avatar { position: relative; display: grid; width: 60px; height: 60px; place-items: center; border: 3px solid rgba(255,255,255,.9); border-radius: 50%; background: linear-gradient(135deg, #639a98, #bdcab7 58%, #e5cda7); box-shadow: 0 3px 9px rgba(42, 66, 75, .14); color: white; font-family: serif; font-size: 24px; }
+.creator-avatar > img { position: absolute; inset: 0; width: 100%; height: 100%; border-radius: inherit; object-fit: cover; }
+.creator-avatar .verified { z-index: 2; }
 .verified { position: absolute; right: -2px; bottom: 1px; display: grid; width: 17px; height: 17px; place-items: center; border: 2px solid white; border-radius: 50%; background: #0e9add; color: white; }
 .creator-main { display: flex; flex-direction: column; gap: 4px; }
 .creator-name-row { display: flex; align-items: center; gap: 8px; }
@@ -160,10 +162,13 @@ h1 { margin: 0; color: #1d2b3c; font-size: 23px; font-weight: 700; letter-spacin
 .art-copy small { font-size: 7px; opacity: .75; }
 .art-copy b { max-width: 150px; font-size: 11px; font-weight: 650; line-height: 1.35; }
 .album-cover { width: 82px; height: 47px; flex: 0 0 auto; border-radius: 5px; cursor: pointer; }
+.thumb-real-image { position: absolute; z-index: 1; inset: 0; width: 100%; height: 100%; border-radius: inherit; object-fit: cover; }
+.thumb-art.image-loaded .art-copy, .thumb-art.image-loaded .art-orbit { display: none; }
 .album-cover .art-copy { top: 11%; left: 8%; }
 .album-cover .art-copy small { font-size: 6px; }
 .album-cover .art-copy b { max-width: 64px; font-size: 8px; }
 .album-cover-count { position: absolute; z-index: 1; right: 4px; bottom: 4px; padding: 2px 4px; border-radius: 3px; background: rgba(0,0,0,.42); color: #fff; font-size: 7px; }
+.album-cover-count { z-index: 2; }
 .album-info { display: flex; min-width: 0; flex: 1; flex-direction: column; gap: 7px; padding: 0; border: 0; background: transparent; cursor: pointer; text-align: left; }
 .album-title-row { display: flex; min-width: 0; align-items: center; gap: 8px; }
 .album-title-row strong { overflow: hidden; color: #344257; font-size: 11px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
@@ -574,6 +579,8 @@ h1 { color: #1f2e42; font-size: 26px; letter-spacing: -.45px; }
 .single-video-info h3 { font-size: 17px; }
 .video-eyebrow, .single-meta, .mode-label { color: #5d6e82; font-size: 13px; }
 .mode-option { height: 40px; font-size: 14px; }
+.mode-option.disabled { cursor: not-allowed; opacity: .58; }
+.mode-disabled-label { margin-left: auto; color: #7c8998; font-size: 11px; white-space: nowrap; }
 .single-action { height: 42px; font-size: 15px; }
 .primary-button, .outline-button { height: 40px; font-size: 14px; }
 .parse-button, .single-action, .batch-create { font-size: 15px; }

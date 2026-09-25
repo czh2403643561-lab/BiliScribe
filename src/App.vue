@@ -34,77 +34,49 @@ const isParsing = ref(false)
 const parseState = ref('idle')
 const parseErrorKind = ref('')
 const parseErrorMessage = ref('')
+const isCreatorInput = computed(() => /^https?:\/\/(?:www\.)?space\.bilibili\.com\/\d+(?:\/|\?|$)/i.test(url.value.trim()))
 const currentPage = ref(1)
 const creatorSearch = ref('')
-const expandedAlbums = ref(new Set(['album-1']))
+const expandedAlbums = ref(new Set())
 const selectedVideoIds = ref(new Set())
 const batchAction = ref('video')
-
-const creatorPages = [
-  [
-    { id: 'album-1', title: '八字入门 · 从零开始学命理', updated: '更新至 18 集', videos: [
-      { id: 'v101', title: '第一课：什么是四柱八字？先把基础概念弄清楚', duration: '18:42', date: '09-18', views: '2.6万', art: 'ink', tag: '第 01 集' },
-      { id: 'v102', title: '天干地支怎么记？一张图理解五行关系', duration: '26:15', date: '09-16', views: '1.9万', art: 'blue', tag: '第 02 集' },
-      { id: 'v103', title: '排盘的基本方法：年柱、月柱、日柱与时柱', duration: '32:08', date: '09-12', views: '1.7万', art: 'sand', tag: '第 03 集' },
-      { id: 'v104', title: '阴阳五行之间的生克关系，听完就能用', duration: '24:39', date: '09-09', views: '1.5万', art: 'green', tag: '第 04 集' },
-    ] },
-    { id: 'album-2', title: '十神与性格分析', updated: '共 12 集', videos: [
-      { id: 'v201', title: '十神是什么？先理解日主和其他天干的关系', duration: '21:36', date: '09-06', views: '1.4万', art: 'rose', tag: '第 01 集' },
-      { id: 'v202', title: '正官与七杀：规则感和行动力怎么看', duration: '29:18', date: '09-02', views: '1.2万', art: 'ink', tag: '第 02 集' },
-      { id: 'v203', title: '食神、伤官的表达特点，结合例子讲清楚', duration: '27:51', date: '08-29', views: '1.1万', art: 'blue', tag: '第 03 集' },
-    ] },
-  ],
-  [
-    { id: 'album-3', title: '八字案例精讲', updated: '共 9 集', videos: [
-      { id: 'v301', title: '案例一：先看日主旺衰，别急着定格局', duration: '34:05', date: '08-25', views: '9860', art: 'green', tag: '案例 01' },
-      { id: 'v302', title: '案例二：用十神关系还原命局结构', duration: '31:44', date: '08-21', views: '9240', art: 'sand', tag: '案例 02' },
-      { id: 'v303', title: '案例三：把大运和流年放回原局里看', duration: '38:12', date: '08-17', views: '8700', art: 'rose', tag: '案例 03' },
-    ] },
-    { id: 'album-4', title: '流年与运势观察', updated: '共 14 集', videos: [
-      { id: 'v401', title: '大运如何排？顺排逆排和起运时间的算法', duration: '25:27', date: '08-13', views: '1.3万', art: 'blue', tag: '第 01 集' },
-      { id: 'v402', title: '流年作用到原局时，先从哪里开始看', duration: '28:56', date: '08-09', views: '1.1万', art: 'ink', tag: '第 02 集' },
-      { id: 'v403', title: '用一个完整例子看大运流年的组合', duration: '35:10', date: '08-05', views: '9840', art: 'sand', tag: '第 03 集' },
-    ] },
-  ],
-  [
-    { id: 'album-5', title: '干支基础知识', updated: '共 8 集', videos: [
-      { id: 'v501', title: '十天干的阴阳属性与基础取象', duration: '19:24', date: '08-01', views: '1.0万', art: 'rose', tag: '第 01 集' },
-      { id: 'v502', title: '十二地支藏干：用结构记忆更轻松', duration: '23:40', date: '07-28', views: '9260', art: 'green', tag: '第 02 集' },
-      { id: 'v503', title: '地支六合、六冲与三合关系梳理', duration: '30:16', date: '07-24', views: '8110', art: 'blue', tag: '第 03 集' },
-    ] },
-  ],
-]
-const allVideos = computed(() => creatorPages.flat().flatMap((album) => album.videos))
-const filteredCollections = computed(() => {
+const creatorData = ref(null)
+const creator = computed(() => creatorData.value || {})
+const creatorAvatarFailed = ref(false)
+const creatorGroups = computed(() => creatorData.value?.groups || [])
+const pageSize = 20
+const creatorResultVideos = computed(() => {
   const query = creatorSearch.value.trim().toLowerCase()
-  return creatorPages.flat().flatMap((album) => {
-    if (!query) return [album]
-    const matchingVideos = album.videos.filter((video) => video.title.toLowerCase().includes(query))
-    if (album.title.toLowerCase().includes(query)) return [album]
-    return matchingVideos.length ? [{ ...album, videos: matchingVideos }] : []
-  })
+  const videos = creatorData.value?.videos || []
+  return query ? videos.filter((video) => video.title.toLowerCase().includes(query)) : videos
 })
-const filteredCreatorPages = computed(() => {
-  const groups = []
-  for (let index = 0; index < filteredCollections.value.length; index += 2) groups.push(filteredCollections.value.slice(index, index + 2))
-  return groups
+const pageCount = computed(() => Math.max(1, Math.ceil(creatorResultVideos.value.length / pageSize)))
+const pageVideos = computed(() => creatorResultVideos.value.slice((currentPage.value - 1) * pageSize, currentPage.value * pageSize))
+const currentAlbums = computed(() => {
+  const pageIds = new Set(pageVideos.value.map((video) => video.id))
+  const query = creatorSearch.value.trim().toLowerCase()
+  return creatorGroups.value.map((group) => {
+    const selectionVideos = query ? group.videos.filter((video) => video.title.toLowerCase().includes(query)) : group.videos
+    return { ...group, selectionVideos, pageVideos: group.videos.filter((video) => pageIds.has(video.id)) }
+  }).filter((group) => group.pageVideos.length)
 })
-const creatorResultVideos = computed(() => filteredCollections.value.flatMap((album) => album.videos))
-const currentAlbums = computed(() => filteredCreatorPages.value[currentPage.value - 1] || [])
-const pageVideos = computed(() => currentAlbums.value.flatMap((album) => album.videos))
+const pageNumbers = computed(() => {
+  const start = Math.max(1, Math.min(currentPage.value - 2, pageCount.value - 4))
+  return Array.from({ length: Math.min(5, pageCount.value) }, (_, index) => start + index)
+})
 const selectedCount = computed(() => selectedVideoIds.value.size)
 const pageAllSelected = computed(() => pageVideos.value.length > 0 && pageVideos.value.every((video) => selectedVideoIds.value.has(video.id)))
 const allSelected = computed(() => creatorResultVideos.value.length > 0 && creatorResultVideos.value.every((video) => selectedVideoIds.value.has(video.id)))
 watch(creatorSearch, () => { currentPage.value = 1 })
 watch(url, () => { if (!isParsing.value) parseState.value = 'idle'; parseErrorKind.value = ''; parseErrorMessage.value = '' })
 
-const creator = { name: '山间命理课', id: '山间命理课', avatar: '山', description: '把复杂的命理知识讲清楚 · 课程持续更新', videos: 16, collections: 5, followers: '8.6万' }
 const singleVideo = ref({ title: '', bvid: '', owner: '', duration: '', date: '', views: null, cover: '', url: '' })
+const singleCoverFailed = ref(false)
 
 function setDemoLink(kind) {
   const samples = {
     video: 'https://www.bilibili.com/video/BV1eQNL6JEV2/',
-    creator: 'https://space.bilibili.com/349327328',
+    creator: 'https://space.bilibili.com/24715837',
     failed: 'https://www.bilibili.com/video/BV1demoFAIL0/',
     invalid: 'https://example.com/video/BV1xx411c7mD',
   }
@@ -124,7 +96,8 @@ async function parseLink() {
   parseState.value = 'loading'
   isParsing.value = true
   try {
-    const response = await fetch('/api/videos/parse', {
+    const creatorMatch = value.match(/^https?:\/\/(?:www\.)?space\.bilibili\.com\/(\d+)(?:\/|\?|$)/i)
+    const response = await fetch(creatorMatch ? '/api/creators/parse' : '/api/videos/parse', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ url: value }),
@@ -136,10 +109,21 @@ async function parseLink() {
       parseState.value = ['invalid_url', 'unsupported_url', 'empty_url'].includes(parseErrorKind.value) ? 'invalid' : 'failed'
       return
     }
-    singleVideo.value = result.video
-    resultType.value = 'video'
+    if (creatorMatch) {
+      creatorData.value = result.creator
+      creatorAvatarFailed.value = false
+      expandedAlbums.value = new Set()
+      creatorSearch.value = ''
+      currentPage.value = 1
+      resultType.value = 'creator'
+      notify(`已解析 ${result.creator.name} 的主页`)
+    } else {
+      singleVideo.value = result.video
+      singleCoverFailed.value = false
+      resultType.value = 'video'
+      notify('视频解析完成')
+    }
     parseState.value = 'success'
-    notify('视频解析完成')
   } catch {
     parseErrorKind.value = 'backend_unavailable'
     parseErrorMessage.value = 'BiliScribe 本地服务未启动，请重新打开 BiliScribe。'
@@ -160,19 +144,21 @@ function setVideos(ids, checked) {
   selectedVideoIds.value = next
 }
 function selectAll() { setVideos(creatorResultVideos.value.map((video) => video.id), true) }
+function selectCurrentPage() { setVideos(pageVideos.value.map((video) => video.id), true) }
+function clearCurrentPage() { setVideos(pageVideos.value.map((video) => video.id), false) }
 function clearAll() { selectedVideoIds.value = new Set() }
 function toggleAlbum(album) {
   const next = new Set(expandedAlbums.value)
   next.has(album.id) ? next.delete(album.id) : next.add(album.id)
   expandedAlbums.value = next
 }
-function albumChecked(album) { return album.videos.every((video) => selectedVideoIds.value.has(video.id)) }
-function toggleAlbumSelection(album) { setVideos(album.videos.map((video) => video.id), !albumChecked(album)) }
+function albumChecked(album) { return album.selectionVideos.length > 0 && album.selectionVideos.every((video) => selectedVideoIds.value.has(video.id)) }
+function toggleAlbumSelection(album) { setVideos(album.selectionVideos.map((video) => video.id), !albumChecked(album)) }
 
 const modeOptions = [
   { id: 'video', label: '下载视频', icon: Film },
   { id: 'audio', label: '下载音频', icon: AudioLines },
-  { id: 'transcript', label: '转写文字稿', icon: FileText },
+  { id: 'transcript', label: '转写文字稿', icon: FileText, disabled: true },
 ]
 const taskNames = { video: '视频下载', audio: '音频下载', transcript: '文字稿转写' }
 const taskIcon = { video: Film, audio: AudioLines, transcript: FileText }
@@ -231,6 +217,25 @@ async function addSingleTask(mode = batchAction.value) {
   page.value = 'tasks'
 }
 
+async function createBatchTasks() {
+  if (!['video', 'audio'].includes(batchAction.value)) return
+  const selected = (creatorData.value?.videos || []).filter((video) => selectedVideoIds.value.has(video.id))
+  if (!selected.length) return
+  try {
+    const response = await fetch('/api/tasks/batch', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ mode: batchAction.value, videos: selected.map(({ bvid, title, owner }) => ({ bvid, title, owner })) }),
+    })
+    const result = await response.json()
+    if (!response.ok) throw new Error(result.error?.message || '批量创建任务失败。')
+    await refreshTasks()
+    page.value = 'tasks'
+    notify(`已创建 ${result.tasks?.length || selected.length} 个${taskNames[batchAction.value]}任务`)
+  } catch (error) {
+    notify(error.message || '本地服务未连接，无法创建下载任务。')
+  }
+}
+
 async function cancelTask(task) {
   try {
     const response = await fetch(`/api/tasks/${task.id}/cancel`, { method: 'POST' })
@@ -285,7 +290,16 @@ async function openTaskLocation(task) {
     const response = await fetch(`/api/tasks/${task.id}/open`, { method: 'POST' })
     const result = await response.json()
     if (!response.ok) throw new Error(result.error?.message || '无法打开文件位置。')
+    notify(result.located ? '已打开并定位到文件' : '已打开保存目录')
   } catch (error) { notify(error.message || '无法打开文件位置。') }
+}
+
+function formatViews(value) {
+  const views = Number(value) || 0
+  return views >= 10000 ? `${(views / 10000).toFixed(1).replace(/\.0$/, '')} 万` : views.toLocaleString('zh-CN')
+}
+function hideLoginAvatar() {
+  if (loginAccount.value) loginAccount.value = { ...loginAccount.value, avatar: '' }
 }
 
 const transcriptText = `今天我们先从最基础的地方开始讲，拿到一个八字，不要着急去判断这个人好还是不好。我们先把四柱摆清楚，年柱、月柱、日柱、时柱，每一个位置都代表不同的信息。\n\n日柱的天干是日主，也就是我们接下来分析时的中心。其他的天干地支，都是围绕日主来看的。你先记住这个顺序：先认日主，再看月令，然后看整个命局里面五行之间怎么流通。\n\n这个地方我们先不要急着下结论。看到一个五行多，不代表它一定就是好，也不能直接说少的那个就一定不好。还是要回到原局，看它在什么位置，跟其他干支是什么关系。我们学习的时候一步一步来，先把每个字认清楚，再慢慢把它们连起来。\n\n比如说现在这个盘，日主是甲木，我们先看月令是不是对它有帮助，再看地支里面有没有根，天干上有没有同类帮扶。这里说的旺衰，是一个基础的观察方法，不是最后的答案。后面我们还要结合十神、组合关系和大运流年来看。\n\n再往下看月令，月令是我们观察季节气候的一个入口。甲木生在不同的月份，它周围的环境不一样，不能拿同一把尺子直接量。看到这里，大家可以先停一下，把月支圈出来，想一想这个季节里面木的状态是什么。先说你看见了什么，再说它对日主有什么影响。\n\n地支里面还有藏干，所以一个地支不能只看表面那个字。我们把藏干写出来以后，再看这些字跟日主之间是什么关系。这个时候十神的概念就可以慢慢用起来了。刚开始记不住没有关系，我们先用表格查，重复几次以后，自然就熟悉了。\n\n大家容易遇到的一个问题，就是只盯着某一个字看。比如说看到一个冲，就马上觉得一定发生什么事情；看到一个合，就马上觉得它们都合住了。实际分析的时候，要把位置、力量和其他关系一起摆出来。现在先不用记复杂判断，我们先把每一步看完整。\n\n做案例的时候，先不要看答案。你按顺序把四柱写出来，标好阴阳和五行，再找日主和月令，最后把天干地支之间的关系连起来。把你看到的写在纸上，然后对照讲解，看看自己在哪一步漏了。这样练，比一上来背结论更有用。\n\n大家做练习的时候，可以先把四柱写出来，在旁边标上每个字的五行和阴阳。刚开始慢一点没有关系，把基础的步骤做对，后面分析才不会乱。今天这节课先到这里，下一节我们接着讲十天干的特点。`
@@ -601,47 +615,47 @@ onUnmounted(() => { clearInterval(taskPollTimer); clearInterval(qrPollTimer); cl
           </div>
 
           <div class="link-panel panel">
-            <div class="link-panel-title"><div class="step-icon"><Link2 :size="18" /></div><div><strong>添加 B 站视频链接</strong><span>目前支持单个视频解析</span></div><span class="supported-tag">Bilibili</span></div>
-            <div class="link-entry"><div class="url-input-wrap"><Link2 :size="17" /><input v-model="url" aria-label="B站单视频链接" placeholder="粘贴 B 站单视频链接" @keydown.enter="parseLink" /><button v-if="url" class="input-clear" aria-label="清空链接" @click="url = ''"><X :size="15" /></button></div><button class="primary-button parse-button" :disabled="isParsing" @click="parseLink"><LoaderCircle v-if="isParsing" class="spin" :size="16" /><Search v-else :size="16" />{{ isParsing ? '解析中' : '解析链接' }}</button></div>
-            <div class="demo-hints"><span class="hint-label">快速测试</span><button @click="setDemoLink('video')">测试视频</button><i></i><button @click="setDemoLink('failed')">无效视频</button><i></i><button @click="setDemoLink('invalid')">非法链接</button><span class="hint-footnote">通过本地后台调用 BBDownNext</span></div>
+            <div class="link-panel-title"><div class="step-icon"><Link2 :size="18" /></div><div><strong>添加 B 站链接</strong><span>支持单个视频或 UP 主主页</span></div><span class="supported-tag">Bilibili</span></div>
+            <div class="link-entry"><div class="url-input-wrap"><Link2 :size="17" /><input v-model="url" aria-label="B站视频或UP主主页链接" placeholder="粘贴 B 站视频或 UP 主主页链接" @keydown.enter="parseLink" /><button v-if="url" class="input-clear" aria-label="清空链接" @click="url = ''"><X :size="15" /></button></div><button class="primary-button parse-button" :disabled="isParsing" @click="parseLink"><LoaderCircle v-if="isParsing" class="spin" :size="16" /><Search v-else :size="16" />{{ isParsing ? '解析中' : '解析链接' }}</button></div>
+            <div class="demo-hints"><span class="hint-label">快速测试</span><button @click="setDemoLink('video')">测试视频</button><i></i><button @click="setDemoLink('creator')">测试 UP 主</button><i></i><button @click="setDemoLink('failed')">无效视频</button><i></i><button @click="setDemoLink('invalid')">非法链接</button><span class="hint-footnote">通过本地后台读取 B 站公开信息</span></div>
           </div>
 
-          <div v-if="parseState !== 'success'" class="empty-state panel parse-state" :class="{ 'parse-loading': parseState === 'loading' }"><div class="empty-state-icon"><LoaderCircle v-if="parseState === 'loading'" class="spin" :size="19" /><XCircle v-else-if="parseState === 'invalid' || parseState === 'failed'" :size="19" /><Link2 v-else :size="19" /></div><strong>{{ parseState === 'loading' ? '正在解析视频' : parseState === 'empty' ? '请先粘贴 B 站视频链接' : parseState === 'idle' ? '等待解析' : parseErrorKind === 'backend_unavailable' ? '本地后台未连接' : parseErrorKind === 'bbdown_unavailable' ? 'BBDownNext 未就绪' : parseState === 'invalid' ? '链接无效或暂不支持' : '视频解析失败' }}</strong><span>{{ parseState === 'loading' ? '正在调用本地后台解析视频信息。' : parseState === 'empty' ? '粘贴 B 站单视频链接，再点击“解析链接”。' : parseState === 'idle' ? '输入 B 站单视频链接后开始解析。' : parseErrorMessage || '请检查链接后重试。' }}</span><button v-if="parseState === 'failed' && parseErrorKind !== 'backend_unavailable' && parseErrorKind !== 'bbdown_unavailable'" class="outline-button empty-retry" @click="parseLink"><RefreshCw :size="14" />重试解析</button></div>
+          <div v-if="parseState !== 'success'" class="empty-state panel parse-state" :class="{ 'parse-loading': parseState === 'loading' }"><div class="empty-state-icon"><LoaderCircle v-if="parseState === 'loading'" class="spin" :size="19" /><XCircle v-else-if="parseState === 'invalid' || parseState === 'failed'" :size="19" /><Link2 v-else :size="19" /></div><strong>{{ parseState === 'loading' ? (isCreatorInput ? '正在解析 UP 主主页' : '正在解析视频') : parseState === 'empty' ? '请先粘贴 B 站链接' : parseState === 'idle' ? '等待解析' : parseErrorKind === 'backend_unavailable' ? '本地后台未连接' : parseErrorKind === 'bbdown_unavailable' ? 'BBDownNext 未就绪' : parseState === 'invalid' ? '链接无效或暂不支持' : '解析失败' }}</strong><span>{{ parseState === 'loading' ? (isCreatorInput ? '正在读取 UP 主资料、视频列表和合集，请稍候。' : '正在调用本地后台解析视频信息。') : parseState === 'empty' ? '粘贴 B 站视频或 UP 主主页链接，再点击“解析链接”。' : parseState === 'idle' ? '输入 B 站视频或 UP 主主页链接后开始解析。' : parseErrorMessage || '请检查链接后重试。' }}</span><button v-if="parseState === 'failed' && parseErrorKind !== 'backend_unavailable' && parseErrorKind !== 'bbdown_unavailable' && parseErrorKind !== 'bilibili_login_expired'" class="outline-button empty-retry" @click="parseLink"><RefreshCw :size="14" />重试解析</button><button v-if="parseErrorKind === 'bilibili_login_expired'" class="outline-button empty-retry" @click="page = 'settings'"><ScanLine :size="14" />前往设置重新扫码</button></div>
 
           <template v-else-if="resultType === 'creator'">
             <div class="creator-panel panel">
-              <div class="creator-cover"><div class="creator-cover-decoration"></div><div class="creator-profile"><div class="creator-avatar">山<span class="verified"><Check :size="10" /></span></div><div class="creator-main"><div class="creator-name-row"><h2>{{ creator.name }}</h2><span class="up-tag">UP 主</span></div><div class="creator-description">{{ creator.description }}</div><div class="creator-id">UID：349327328 <span>·</span> 粉丝 {{ creator.followers }}</div></div></div><div class="creator-stats"><div><strong>{{ creator.videos }}</strong><span>视频</span></div><div><strong>{{ creator.collections }}</strong><span>合集</span></div></div></div>
+              <div class="creator-cover"><div class="creator-cover-decoration"></div><div class="creator-profile"><div class="creator-avatar"><img v-if="creator.avatar && !creatorAvatarFailed" :src="creator.avatar" alt="" @error="creatorAvatarFailed = true" /><span v-else>{{ creator.name?.slice(0, 1) || 'UP' }}</span><span class="verified"><Check :size="10" /></span></div><div class="creator-main"><div class="creator-name-row"><h2>{{ creator.name }}</h2><span class="up-tag">UP 主</span></div><div class="creator-description">{{ creator.description || 'B 站 UP 主主页' }}</div><div class="creator-id">UID：{{ creator.uid }} <span>·</span> 粉丝 {{ formatViews(creator.followers) }}</div></div></div><div class="creator-stats"><div><strong>{{ creator.videoCount }}</strong><span>投稿视频</span></div><div><strong>{{ creator.collectionCount }}</strong><span>合集 / 系列</span></div></div></div>
               <div class="creator-toolbar">
-                <div class="toolbar-left"><h3>视频与合集</h3><span class="toolbar-count">{{ creatorResultVideos.length }} 个视频</span><span class="toolbar-divider"></span><button class="text-action" @click="selectAll"><CheckCheck :size="15" />{{ creatorSearch.trim() ? '全选筛选结果' : '全选全部结果' }} <small>({{ creatorResultVideos.length }})</small></button><button class="text-action" @click="setVideos(pageVideos.map((v) => v.id), true)"><Check :size="15" />全选当前页</button><button class="text-action muted" @click="clearAll"><XCircle :size="15" />取消全部</button><button class="text-action muted" @click="setVideos(pageVideos.map((v) => v.id), false)"><X :size="15" />取消当前页</button></div><label class="creator-search"><Search :size="15" /><input v-model="creatorSearch" placeholder="搜索视频标题" aria-label="搜索视频标题" /><button v-if="creatorSearch" type="button" aria-label="清空搜索" @click="creatorSearch = ''"><X :size="13" /></button></label>
+                <div class="toolbar-left"><h3>视频与合集</h3><span class="toolbar-count">{{ creator.videoCount }} 个投稿视频</span><span class="toolbar-divider"></span><button class="text-action" @click="selectAll"><CheckCheck :size="15" />{{ creatorSearch.trim() ? '全选筛选结果' : '全选全部结果' }} <small>({{ creatorResultVideos.length }})</small></button><button class="text-action" @click="selectCurrentPage"><Check :size="15" />全选当前页</button><button class="text-action muted" @click="clearAll"><XCircle :size="15" />取消全部</button><button class="text-action muted" @click="clearCurrentPage"><X :size="15" />取消当前页</button></div><label class="creator-search"><Search :size="15" /><input v-model="creatorSearch" placeholder="搜索视频标题" aria-label="搜索视频标题" /><button v-if="creatorSearch" type="button" aria-label="清空搜索" @click="creatorSearch = ''"><X :size="13" /></button></label>
               </div>
-              <div class="selection-line"><label class="check-label"><input type="checkbox" :checked="pageAllSelected" @change="setVideos(pageVideos.map((v) => v.id), $event.target.checked)" /><span class="custom-check"><Check :size="12" /></span><span>本页全选</span></label><span v-if="creatorResultVideos.length">第 {{ currentPage }} 页 · {{ pageVideos.length }} 个视频</span><span v-else>当前没有匹配的视频</span><span v-if="allSelected" class="selection-success">已选择全部 {{ creatorResultVideos.length }} 个视频<span v-if="creatorSearch.trim()">（当前筛选结果）</span></span><span v-else-if="selectedCount" class="selection-count">已选 {{ selectedCount }} 个<span>{{ creatorSearch.trim() ? '（包含筛选外选择）' : '（全部页面）' }}</span></span></div>
+              <div class="selection-line"><label class="check-label"><input type="checkbox" :checked="pageAllSelected" @change="$event.target.checked ? selectCurrentPage() : clearCurrentPage()" /><span class="custom-check"><Check :size="12" /></span><span>本页全选</span></label><span v-if="creatorResultVideos.length">第 {{ currentPage }} 页 · {{ pageVideos.length }} 个视频</span><span v-else>当前没有匹配的视频</span><span v-if="allSelected" class="selection-success">已选择全部 {{ creatorResultVideos.length }} 个匹配视频</span><span v-else-if="selectedCount" class="selection-count">已选 {{ selectedCount }} 个<span>{{ creatorSearch.trim() ? '（包含筛选外选择）' : '（所有页面）' }}</span></span></div>
 
               <div v-if="creatorResultVideos.length" class="album-list">
                 <article v-for="album in currentAlbums" :key="album.id" class="album-card">
                   <div class="album-heading">
-                    <label class="album-check check-label" :title="`选择${album.title}内全部视频`"><input type="checkbox" :checked="albumChecked(album)" @change="toggleAlbumSelection(album)" /><span class="custom-check"><Check :size="12" /></span></label>
-                    <button class="album-cover thumb-art" :class="album.videos[0].art" @click="toggleAlbum(album)"><span class="art-orbit"></span><span class="art-copy"><small>{{ album.videos[0].tag }}</small><b>{{ album.title.split(' · ')[0] }}</b></span><span class="album-cover-count">{{ album.videos.length }} 集</span></button>
-                    <button class="album-info" @click="toggleAlbum(album)"><span class="album-title-row"><strong>{{ album.title }}</strong><span class="album-tag"><Archive :size="12" />合集</span></span><span class="album-subtitle">{{ album.updated }} <i>·</i> 山间命理课</span></button>
+                    <label class="album-check check-label" :title="`选择${album.title}中的${creatorSearch.trim() ? '匹配' : '全部'}视频`"><input type="checkbox" :checked="albumChecked(album)" @change="toggleAlbumSelection(album)" /><span class="custom-check"><Check :size="12" /></span></label>
+                    <button class="album-cover thumb-art" @click="toggleAlbum(album)"><span class="art-orbit"></span><span class="art-copy"><small>{{ album.kind === 'other' ? '投稿' : album.kind === 'series' ? '系列' : '合集' }}</small><b>{{ album.title }}</b></span><img v-if="album.cover" class="thumb-real-image" :src="album.cover" alt="" @load="$event.target.parentElement.classList.add('image-loaded')" @error="$event.target.style.display = 'none'" /><span class="album-cover-count">{{ album.total }} 个视频</span></button>
+                    <button class="album-info" @click="toggleAlbum(album)"><span class="album-title-row"><strong>{{ album.title }}</strong><span class="album-tag"><Archive :size="12" />{{ album.kind === 'other' ? '其他视频' : album.kind === 'series' ? '系列' : '合集' }}</span></span><span class="album-subtitle">共 {{ album.total }} 个视频 <i>·</i> {{ album.owner }}</span></button>
                     <button class="album-expand" @click="toggleAlbum(album)"><span>{{ expandedAlbums.has(album.id) ? '收起' : '展开' }}</span><ChevronDown :size="16" :class="{ rotated: expandedAlbums.has(album.id) }" /></button>
                   </div>
                   <div v-if="expandedAlbums.has(album.id)" class="video-list">
-                    <div v-for="video in album.videos" :key="video.id" class="video-row" :class="{ selected: selectedVideoIds.has(video.id) }">
+                    <div v-for="video in album.pageVideos" :key="`${album.id}-${video.id}`" class="video-row" :class="{ selected: selectedVideoIds.has(video.id) }">
                       <label class="check-label video-checkbox"><input type="checkbox" :checked="selectedVideoIds.has(video.id)" @change="toggleVideo(video.id)" /><span class="custom-check"><Check :size="12" /></span></label>
-                      <div class="video-thumb thumb-art" :class="video.art"><span class="art-orbit"></span><span class="art-copy"><small>{{ video.tag }}</small><b>{{ video.title.split('：')[0] }}</b></span><span class="thumb-duration">{{ video.duration }}</span></div>
-                      <div class="video-details"><strong>{{ video.title }}</strong><div class="video-meta"><span><UserRound :size="12" />山间命理课</span><span><CirclePlay :size="12" />{{ video.views }} 播放</span><span>{{ video.date }}</span></div></div>
+                      <div class="video-thumb thumb-art"><span class="art-orbit"></span><span class="art-copy"><small>{{ video.bvid }}</small><b>{{ video.title }}</b></span><img v-if="video.cover" class="thumb-real-image" :src="video.cover" alt="" @load="$event.target.parentElement.classList.add('image-loaded')" @error="$event.target.style.display = 'none'" /><span class="thumb-duration">{{ video.duration }}</span></div>
+                      <div class="video-details"><strong>{{ video.title }}</strong><div class="video-meta"><span><UserRound :size="12" />{{ video.owner }}</span><span><CirclePlay :size="12" />{{ formatViews(video.views) }} 播放</span><span>{{ video.date }}</span></div></div>
                       <div class="video-trailing"><span class="format-label"><Video :size="13" />视频</span><button class="icon-button row-more" title="更多操作"><MoreHorizontal :size="17" /></button></div>
                     </div>
                   </div>
                 </article>
               </div>
               <div v-else class="empty-state search-empty"><div class="empty-state-icon"><Search :size="18" /></div><strong>没有找到匹配的视频</strong><span>试试其他标题关键词。</span></div>
-              <div v-if="creatorResultVideos.length" class="list-footer"><div class="result-count">共 <strong>{{ creatorResultVideos.length }}</strong> 个匹配视频，分为 <strong>{{ filteredCreatorPages.length }}</strong> 页</div><div class="pagination"><button class="page-arrow" :disabled="currentPage === 1" aria-label="上一页" @click="currentPage--"><ChevronLeft :size="16" /></button><button v-for="number in filteredCreatorPages.length" :key="number" class="page-number" :class="{ active: currentPage === number }" @click="currentPage = number">{{ number }}</button><button class="page-arrow" :disabled="currentPage === filteredCreatorPages.length" aria-label="下一页" @click="currentPage++"><ChevronRight :size="16" /></button><span class="page-total">共 {{ filteredCreatorPages.length }} 页</span></div></div>
+              <div v-if="creatorResultVideos.length" class="list-footer"><div class="result-count">共 <strong>{{ creatorResultVideos.length }}</strong> 个匹配视频，分为 <strong>{{ pageCount }}</strong> 页</div><div class="pagination"><button class="page-arrow" :disabled="currentPage === 1" aria-label="上一页" @click="currentPage--"><ChevronLeft :size="16" /></button><button v-for="number in pageNumbers" :key="number" class="page-number" :class="{ active: currentPage === number }" @click="currentPage = number">{{ number }}</button><button class="page-arrow" :disabled="currentPage === pageCount" aria-label="下一页" @click="currentPage++"><ChevronRight :size="16" /></button><span class="page-total">第 {{ currentPage }} / {{ pageCount }} 页</span></div></div>
             </div>
           </template>
 
           <div v-else class="single-result panel">
             <div class="section-heading"><div><div class="eyebrow">解析结果</div><h2>单个视频</h2></div><span class="result-chip"><Check :size="14" />已识别</span></div>
-            <div class="single-video-card"><div class="single-cover thumb-art" :class="singleVideo.cover ? 'has-real-cover' : 'cover-unavailable'"><img v-if="singleVideo.cover" class="real-cover" :src="singleVideo.cover" alt="视频封面" /><span v-else class="cover-placeholder">封面暂不可用</span><span class="thumb-duration">{{ singleVideo.duration }}</span></div><div class="single-video-info"><span class="video-eyebrow"><Radio :size="13" />真实解析结果</span><h3>{{ singleVideo.title }}</h3><div class="single-meta"><span><UserRound :size="14" />{{ singleVideo.owner }}</span><span v-if="singleVideo.bvid">{{ singleVideo.bvid }}</span><span v-if="singleVideo.date">{{ singleVideo.date }}</span><span v-if="singleVideo.views !== null">{{ Number(singleVideo.views).toLocaleString('zh-CN') }} 播放</span></div><div class="single-divider"></div><div class="mode-label">选择处理方式</div><div class="mode-options"><button v-for="mode in modeOptions" :key="mode.id" class="mode-option" :class="{ active: batchAction === mode.id }" @click="batchAction = mode.id"><component :is="mode.icon" :size="17" /><span>{{ mode.label }}</span><span class="mode-radio"><i></i></span></button></div><button class="primary-button single-action" @click="addSingleTask(batchAction)"><Plus :size="16" />创建任务</button></div></div>
+            <div class="single-video-card"><div class="single-cover thumb-art" :class="singleVideo.cover && !singleCoverFailed ? 'has-real-cover' : 'cover-unavailable'"><img v-if="singleVideo.cover && !singleCoverFailed" class="real-cover" :src="singleVideo.cover" alt="视频封面" @error="singleCoverFailed = true" /><span v-else class="cover-placeholder">封面暂不可用</span><span class="thumb-duration">{{ singleVideo.duration }}</span></div><div class="single-video-info"><span class="video-eyebrow"><Radio :size="13" />真实解析结果</span><h3>{{ singleVideo.title }}</h3><div class="single-meta"><span><UserRound :size="14" />{{ singleVideo.owner }}</span><span v-if="singleVideo.bvid">{{ singleVideo.bvid }}</span><span v-if="singleVideo.date">{{ singleVideo.date }}</span><span v-if="singleVideo.views !== null">{{ Number(singleVideo.views).toLocaleString('zh-CN') }} 播放</span></div><div class="single-divider"></div><div class="mode-label">选择处理方式</div><div class="mode-options"><button v-for="mode in modeOptions" :key="mode.id" class="mode-option" :class="{ active: batchAction === mode.id, disabled: mode.disabled }" :disabled="mode.disabled" :title="mode.disabled ? '文字稿功能将在后续版本接入' : ''" @click="batchAction = mode.id"><component :is="mode.icon" :size="17" /><span>{{ mode.label }}</span><span v-if="mode.disabled" class="mode-disabled-label">下一阶段</span><span v-else class="mode-radio"><i></i></span></button></div><button class="primary-button single-action" :disabled="batchAction === 'transcript'" @click="addSingleTask(batchAction)"><Plus :size="16" />创建任务</button></div></div>
           </div>
         </section>
 
@@ -669,7 +683,7 @@ onUnmounted(() => { clearInterval(taskPollTimer); clearInterval(qrPollTimer); cl
         <section v-else class="page-content settings-page">
           <div class="page-heading"><div><div class="eyebrow">PREFERENCES</div><h1>设置</h1><p>管理登录状态、转写服务和文件保存位置。</p></div><span v-if="settingsDirty" class="unsaved-pill">未保存</span><button class="primary-button save-settings" @click="saveSettings"><Check :size="16" />保存设置</button></div>
           <div class="settings-layout"><aside class="settings-nav panel"><span class="settings-nav-label">偏好设置</span><a class="settings-nav-item active"><UserRound :size="16" />账号与服务</a><a class="settings-nav-item"><FolderOpen :size="16" />文件与目录</a><a class="settings-nav-item"><SlidersIcon />任务处理</a><div class="settings-nav-divider"></div><div class="settings-nav-help"><CircleHelp :size="16" /><span>遇到问题？<small>查看使用说明</small></span><ExternalLink :size="13" /></div></aside><div class="settings-content">
-            <section class="settings-card panel"><div class="settings-card-heading"><div class="settings-heading-icon bilibili-icon">哔</div><div><h2>B 站账号</h2><p>登录后可访问需要登录的视频内容</p></div><span class="settings-status" :class="loginState ? 'ok' : 'off'"><i></i>{{ loginLoading ? '检查中' : loginState ? '已登录' : '未登录' }}</span></div><div class="setting-divider"></div><div class="account-row"><div class="account-avatar"><img v-if="loginAccount?.avatar" :src="loginAccount.avatar" alt="" />{{ loginAccount?.avatar ? '' : loginState ? (loginAccount?.name?.slice(0, 1) || 'B') : 'B' }}<span :class="{ online: loginState }"></span></div><div class="account-info"><strong>{{ loginAccount?.name || (loginState ? 'B 站账号' : '尚未登录 B 站') }}</strong><span>{{ loginAccount?.uid ? `UID：${loginAccount.uid}` : loginState ? '已使用本机保存的登录状态' : '扫码登录以使用完整解析能力' }}</span></div><button class="outline-button account-button" @click="openQrDialog"><ScanLine :size="15" />{{ loginState ? '重新登录' : '扫码登录' }}</button><button v-if="loginState" class="outline-button account-button logout-account-button" @click="logoutConfirm = true"><LogOut :size="15" />退出登录</button></div><div class="settings-tip"><ShieldCheck :size="15" /><span>登录凭据仅保存在本机，并由 BBDownNext 管理；公开视频仍可在未登录时解析。</span></div></section>
+            <section class="settings-card panel"><div class="settings-card-heading"><div class="settings-heading-icon bilibili-icon">哔</div><div><h2>B 站账号</h2><p>登录后可访问需要登录的视频内容</p></div><span class="settings-status" :class="loginState ? 'ok' : 'off'"><i></i>{{ loginLoading ? '检查中' : loginState ? '已登录' : '未登录' }}</span></div><div class="setting-divider"></div><div class="account-row"><div class="account-avatar"><img v-if="loginAccount?.avatar" :src="loginAccount.avatar" alt="" @error="hideLoginAvatar" />{{ !loginAccount?.avatar ? (loginState ? (loginAccount?.name?.slice(0, 1) || 'B') : 'B') : '' }}<span :class="{ online: loginState }"></span></div><div class="account-info"><strong>{{ loginAccount?.name || (loginState ? 'B 站账号' : '尚未登录 B 站') }}</strong><span>{{ loginAccount?.uid ? `UID：${loginAccount.uid}` : loginState ? '已使用本机保存的登录状态' : '扫码登录以使用完整解析能力' }}</span></div><button class="outline-button account-button" @click="openQrDialog"><ScanLine :size="15" />{{ loginState ? '重新登录' : '扫码登录' }}</button><button v-if="loginState" class="outline-button account-button logout-account-button" @click="logoutConfirm = true"><LogOut :size="15" />退出登录</button></div><div class="settings-tip"><ShieldCheck :size="15" /><span>登录凭据仅保存在本机，并由 BBDownNext 管理；公开视频仍可在未登录时解析。</span></div></section>
             <section class="settings-card panel"><div class="settings-card-heading"><div class="settings-heading-icon model-icon"><Sparkles :size="18" /></div><div><h2>文字稿模型</h2><p>用于将视频音频转换为课程文字稿</p></div><span class="fixed-tag"><LockKeyhole :size="12" />固定模型</span></div><div class="model-field"><label>模型</label><div class="model-select"><span class="model-dot"></span><strong>MiMo V2.6 Flash</strong><span class="model-subtle">快速 · 低成本</span><ChevronDown :size="16" /></div><small>转写结果忠实保留原话，不总结、不重写。</small></div><div class="api-key-field"><div class="api-label"><label for="api-key">MiMo API Key</label><a href="#" @click.prevent="notify('API Key 申请链接为演示内容')">如何获取？<ExternalLink :size="12" /></a></div><div class="api-input-row"><div class="key-input"><KeyRound :size="16" /><input id="api-key" v-model="apiKey" :type="showApiKey ? 'text' : 'password'" autocomplete="off" placeholder="输入你的 API Key" @input="apiTested = false" /><button type="button" class="key-visibility" :aria-label="showApiKey ? '隐藏 API Key' : '显示 API Key'" @click="showApiKey = !showApiKey"><component :is="showApiKey ? EyeOff : Eye" :size="15" /></button></div><button class="outline-button test-api-button" :disabled="apiTesting" @click="testApi"><LoaderCircle v-if="apiTesting" class="spin" :size="15" /><Activity v-else :size="15" />{{ apiTesting ? '测试中' : '测试连接' }}</button></div><div class="api-feedback"><span v-if="apiTested" class="success-text"><Check :size="13" />连接成功（演示）</span><span v-else-if="!apiKey.trim()"><LockKeyhole :size="12" />尚未配置 API Key</span><span v-else-if="settingsDirty"><CircleHelp :size="13" />有未保存的更改</span><span v-else><Check :size="13" />已保存到当前演示会话</span></div><div v-if="!apiKey.trim()" class="empty-state api-empty-state"><div class="empty-state-icon"><KeyRound :size="16" /></div><strong>API 尚未配置</strong><span>填写并保存 API Key 后，才可测试连接。</span></div></div></section>
             <section class="settings-card panel"><div class="settings-card-heading"><div class="settings-heading-icon folder-icon"><FolderOpen :size="18" /></div><div><h2>文件与目录</h2><p>设置下载文件和文字稿的保存位置</p></div></div><div class="setting-divider"></div><div class="path-setting"><div><label>视频与音频目录</label><span>下载完成的媒体文件保存位置</span></div><div class="path-control"><input v-model="downloadPath" aria-label="视频与音频目录" /></div></div><div class="path-setting"><div><label>文字稿目录</label><span>转写完成后导出的 TXT 文件位置</span></div><div class="path-control"><input v-model="transcriptPath" aria-label="文字稿目录" /></div></div><div class="settings-tip folder-tip"><HardDriveDownload :size="15" /><span>保存后立即用于新下载任务；目录不存在时会自动创建。文字稿目录暂未接入。</span></div></section>
             <section class="settings-card compact-settings panel"><div class="settings-card-heading"><div class="settings-heading-icon queue-icon"><ListChecks :size="18" /></div><div><h2>任务队列</h2><p>下载与转写任务使用同一个串行队列</p></div></div><div class="queue-setting-line"><span>同时执行的任务</span><span class="serial-value"><span class="live-dot"></span>1 个任务 <span class="locked-mini"><LockKeyhole :size="11" />第一版固定</span></span></div></section>
@@ -679,7 +693,7 @@ onUnmounted(() => { clearInterval(taskPollTimer); clearInterval(qrPollTimer); cl
       </div>
     </main>
 
-    <div v-if="page === 'new' && parseState === 'success' && resultType === 'creator' && selectedCount" class="batch-bar"><div class="batch-selection"><div class="batch-selected-icon"><Check :size="16" /></div><div><strong>已选择 {{ selectedCount }} 个视频</strong><small v-if="creatorSearch.trim()">包含当前筛选外的选择</small><button @click="clearAll">清空选择</button></div></div><span class="batch-divider"></span><div class="batch-action-select"><span>添加为</span><button v-for="mode in modeOptions" :key="mode.id" :class="{ active: batchAction === mode.id }" @click="batchAction = mode.id"><component :is="mode.icon" :size="15" />{{ mode.label }}<span class="radio-dot"><i></i></span></button></div><button class="primary-button batch-create" disabled title="UP 主批量下载暂未接入"><Plus :size="16" />UP 主批量下载暂未接入</button></div>
+    <div v-if="page === 'new' && parseState === 'success' && resultType === 'creator' && selectedCount" class="batch-bar"><div class="batch-selection"><div class="batch-selected-icon"><Check :size="16" /></div><div><strong>已选择 {{ selectedCount }} 个视频</strong><small v-if="creatorSearch.trim()">包含当前筛选外的选择</small><button @click="clearAll">清空选择</button></div></div><span class="batch-divider"></span><div class="batch-action-select"><span>添加为</span><button v-for="mode in modeOptions" :key="mode.id" :class="{ active: batchAction === mode.id, disabled: mode.disabled }" :disabled="mode.disabled" @click="batchAction = mode.id"><component :is="mode.icon" :size="15" />{{ mode.label }}<span v-if="mode.disabled" class="mode-disabled-label">下一阶段</span><span v-else class="radio-dot"><i></i></span></button></div><button class="primary-button batch-create" :disabled="batchAction === 'transcript'" @click="createBatchTasks"><Plus :size="16" />创建 {{ selectedCount }} 个任务</button></div>
 
     <div v-if="confirmationDialog" class="modal-backdrop" @click.self="confirmation = null"><div class="confirm-modal panel" role="dialog" aria-modal="true" :aria-label="confirmationTitle"><button class="icon-button modal-close" aria-label="关闭" @click="confirmation = null"><X :size="18" /></button><div class="confirm-modal-icon"><CircleHelp :size="20" /></div><h2>{{ confirmationTitle }}</h2><p>{{ confirmationMessage }}</p><div class="confirm-actions"><button class="outline-button" @click="confirmation = null">返回</button><button class="primary-button confirm-danger" @click="confirmAction">{{ confirmation?.type === 'clear-history' ? '清除历史' : '确认取消' }}</button></div></div></div>
     <div v-if="qrDialog" class="modal-backdrop" @click.self="closeQrDialog"><div class="login-modal panel" role="dialog" aria-modal="true" aria-label="扫码登录 B 站"><button class="icon-button modal-close" aria-label="关闭" @click="closeQrDialog"><X :size="18" /></button><div class="login-modal-icon"><ScanLine :size="22" /></div><h2>扫码登录 B 站</h2><p>打开哔哩哔哩 App，扫描二维码完成登录</p><div class="real-qr" :class="{ 'qr-is-loading': qrStarting }"><img v-if="qrImage" :src="qrImage" alt="B 站登录二维码" /><div v-else class="qr-placeholder"><LoaderCircle v-if="qrStarting" class="spin" :size="24" /><ScanLine v-else :size="24" /></div></div><div class="qr-note" :class="`qr-${qrStatus}`"><span class="live-dot"></span>{{ qrStatusLabel }}</div><p v-if="qrMessage" class="qr-error-message">{{ qrMessage }}</p><button v-if="['expired', 'failed'].includes(qrStatus)" class="primary-button simulate-login" :disabled="qrStarting" @click="startQrLogin"><RefreshCw :size="16" />刷新二维码</button><small class="modal-disclaimer">登录信息仅保存在本机，不会发送给 BiliScribe 服务之外的站点。</small></div></div>
