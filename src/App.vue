@@ -1,0 +1,370 @@
+<script setup>
+import { computed, onMounted, onUnmounted, ref } from 'vue'
+import {
+  Activity, Archive, ArrowDownToLine, AudioLines, Bell, BookOpenText, CalendarDays, Check,
+  CheckCheck, ChevronDown, ChevronLeft, ChevronRight, CircleHelp, CirclePlay,
+  Clock3, CloudDownload, Copy, Download, ExternalLink, FileAudio, FileText,
+  Film, FolderOpen, Gauge, HardDriveDownload, History, Home, KeyRound, Link2,
+  ListChecks, LoaderCircle, LockKeyhole, LogOut, Menu, MoreHorizontal,
+  PanelLeftClose, Pause, Play, Plus, Radio, RefreshCw, ScanLine, Search,
+  Settings2, ShieldCheck, SlidersHorizontal, Sparkles, Trash2, Upload, UserRound, Video,
+  X, XCircle, Zap,
+} from '@lucide/vue'
+
+const navItems = [
+  { id: 'new', label: '新建任务', icon: Plus },
+  { id: 'tasks', label: '任务', icon: ListChecks, badge: '4' },
+  { id: 'transcripts', label: '文字稿', icon: BookOpenText },
+  { id: 'settings', label: '设置', icon: Settings2 },
+]
+const page = ref('new')
+const toast = ref('')
+let toastTimer
+let progressTimer
+
+function notify(message) {
+  toast.value = message
+  clearTimeout(toastTimer)
+  toastTimer = setTimeout(() => (toast.value = ''), 2600)
+}
+
+const url = ref('https://space.bilibili.com/349327328')
+const resultType = ref('creator')
+const isParsing = ref(false)
+const currentPage = ref(1)
+const expandedAlbums = ref(new Set(['album-1']))
+const selectedVideoIds = ref(new Set())
+const batchAction = ref('video')
+
+const creatorPages = [
+  [
+    { id: 'album-1', title: '八字入门 · 从零开始学命理', updated: '更新至 18 集', videos: [
+      { id: 'v101', title: '第一课：什么是四柱八字？先把基础概念弄清楚', duration: '18:42', date: '09-18', views: '2.6万', art: 'ink', tag: '第 01 集' },
+      { id: 'v102', title: '天干地支怎么记？一张图理解五行关系', duration: '26:15', date: '09-16', views: '1.9万', art: 'blue', tag: '第 02 集' },
+      { id: 'v103', title: '排盘的基本方法：年柱、月柱、日柱与时柱', duration: '32:08', date: '09-12', views: '1.7万', art: 'sand', tag: '第 03 集' },
+      { id: 'v104', title: '阴阳五行之间的生克关系，听完就能用', duration: '24:39', date: '09-09', views: '1.5万', art: 'green', tag: '第 04 集' },
+    ] },
+    { id: 'album-2', title: '十神与性格分析', updated: '共 12 集', videos: [
+      { id: 'v201', title: '十神是什么？先理解日主和其他天干的关系', duration: '21:36', date: '09-06', views: '1.4万', art: 'rose', tag: '第 01 集' },
+      { id: 'v202', title: '正官与七杀：规则感和行动力怎么看', duration: '29:18', date: '09-02', views: '1.2万', art: 'ink', tag: '第 02 集' },
+      { id: 'v203', title: '食神、伤官的表达特点，结合例子讲清楚', duration: '27:51', date: '08-29', views: '1.1万', art: 'blue', tag: '第 03 集' },
+    ] },
+  ],
+  [
+    { id: 'album-3', title: '八字案例精讲', updated: '共 9 集', videos: [
+      { id: 'v301', title: '案例一：先看日主旺衰，别急着定格局', duration: '34:05', date: '08-25', views: '9860', art: 'green', tag: '案例 01' },
+      { id: 'v302', title: '案例二：用十神关系还原命局结构', duration: '31:44', date: '08-21', views: '9240', art: 'sand', tag: '案例 02' },
+      { id: 'v303', title: '案例三：把大运和流年放回原局里看', duration: '38:12', date: '08-17', views: '8700', art: 'rose', tag: '案例 03' },
+    ] },
+    { id: 'album-4', title: '流年与运势观察', updated: '共 14 集', videos: [
+      { id: 'v401', title: '大运如何排？顺排逆排和起运时间的算法', duration: '25:27', date: '08-13', views: '1.3万', art: 'blue', tag: '第 01 集' },
+      { id: 'v402', title: '流年作用到原局时，先从哪里开始看', duration: '28:56', date: '08-09', views: '1.1万', art: 'ink', tag: '第 02 集' },
+      { id: 'v403', title: '用一个完整例子看大运流年的组合', duration: '35:10', date: '08-05', views: '9840', art: 'sand', tag: '第 03 集' },
+    ] },
+  ],
+  [
+    { id: 'album-5', title: '干支基础知识', updated: '共 8 集', videos: [
+      { id: 'v501', title: '十天干的阴阳属性与基础取象', duration: '19:24', date: '08-01', views: '1.0万', art: 'rose', tag: '第 01 集' },
+      { id: 'v502', title: '十二地支藏干：用结构记忆更轻松', duration: '23:40', date: '07-28', views: '9260', art: 'green', tag: '第 02 集' },
+      { id: 'v503', title: '地支六合、六冲与三合关系梳理', duration: '30:16', date: '07-24', views: '8110', art: 'blue', tag: '第 03 集' },
+    ] },
+  ],
+]
+const allVideos = computed(() => creatorPages.flat().flatMap((album) => album.videos))
+const pageVideos = computed(() => (creatorPages[currentPage.value - 1] || []).flatMap((album) => album.videos))
+const selectedCount = computed(() => selectedVideoIds.value.size)
+const pageAllSelected = computed(() => pageVideos.value.length > 0 && pageVideos.value.every((video) => selectedVideoIds.value.has(video.id)))
+const allSelected = computed(() => allVideos.value.length > 0 && allVideos.value.every((video) => selectedVideoIds.value.has(video.id)))
+
+const creator = { name: '山间命理课', id: '山间命理课', avatar: '山', description: '把复杂的命理知识讲清楚 · 课程持续更新', videos: 16, collections: 5, followers: '8.6万' }
+const singleVideo = {
+  title: '八字入门第一课：四柱、干支和五行基础概念讲解',
+  owner: '山间命理课', duration: '18:42', date: '2026-09-18', views: '2.6万', art: 'ink',
+}
+
+function parseLink() {
+  isParsing.value = true
+  setTimeout(() => {
+    isParsing.value = false
+    const value = url.value.trim()
+    if (/BV[a-zA-Z0-9]+/i.test(value) || /b23\.tv/i.test(value)) {
+      resultType.value = 'video'
+      selectedVideoIds.value = new Set()
+      notify('已解析单个视频（演示数据）')
+    } else {
+      resultType.value = 'creator'
+      currentPage.value = 1
+      notify('已解析 UP 主主页（演示数据）')
+    }
+  }, 550)
+}
+
+function toggleVideo(id) {
+  const next = new Set(selectedVideoIds.value)
+  next.has(id) ? next.delete(id) : next.add(id)
+  selectedVideoIds.value = next
+}
+function setVideos(ids, checked) {
+  const next = new Set(selectedVideoIds.value)
+  ids.forEach((id) => checked ? next.add(id) : next.delete(id))
+  selectedVideoIds.value = next
+}
+function selectAll() { setVideos(allVideos.value.map((video) => video.id), true) }
+function clearAll() { selectedVideoIds.value = new Set() }
+function toggleAlbum(album) {
+  const next = new Set(expandedAlbums.value)
+  next.has(album.id) ? next.delete(album.id) : next.add(album.id)
+  expandedAlbums.value = next
+}
+function albumChecked(album) { return album.videos.every((video) => selectedVideoIds.value.has(video.id)) }
+function toggleAlbumSelection(album) { setVideos(album.videos.map((video) => video.id), !albumChecked(album)) }
+
+const modeOptions = [
+  { id: 'video', label: '下载视频', icon: Film },
+  { id: 'audio', label: '下载音频', icon: AudioLines },
+  { id: 'transcript', label: '转写文字稿', icon: FileText },
+]
+const taskNames = { video: '视频下载', audio: '音频下载', transcript: '文字稿转写' }
+const taskIcon = { video: Film, audio: AudioLines, transcript: FileText }
+const CalendarIcon = CalendarDays
+const SlidersIcon = SlidersHorizontal
+let nextTaskId = 10
+const tasks = ref([
+  { id: 1, title: '八字入门第一课：四柱与五行基础概念', owner: '山间命理课', mode: 'video', status: 'running', progress: 42, size: '286 MB' },
+  { id: 2, title: '天干地支怎么记？一张图理解五行关系', owner: '山间命理课', mode: 'audio', status: 'waiting', progress: 0, size: '—' },
+  { id: 3, title: '排盘的基本方法：年柱、月柱、日柱与时柱', owner: '山间命理课', mode: 'transcript', status: 'waiting', progress: 0, size: '—' },
+  { id: 4, title: '阴阳五行之间的生克关系', owner: '山间命理课', mode: 'transcript', status: 'completed', progress: 100, size: 'TXT · 14 KB' },
+  { id: 5, title: '八字入门：认识十天干', owner: '山间命理课', mode: 'video', status: 'failed', progress: 17, size: '—' },
+])
+const taskFilter = ref('全部')
+const taskFilters = ['全部', '进行中', '等待', '已完成', '失败']
+const filteredTasks = computed(() => {
+  const map = { 进行中: 'running', 等待: 'waiting', 已完成: 'completed', 失败: 'failed' }
+  return tasks.value.filter((task) => taskFilter.value === '全部' || task.status === map[taskFilter.value])
+})
+const runningTask = computed(() => tasks.value.find((task) => task.status === 'running'))
+const waitingTasks = computed(() => tasks.value.filter((task) => task.status === 'waiting'))
+const completedCount = computed(() => tasks.value.filter((task) => task.status === 'completed').length)
+const queueCount = computed(() => waitingTasks.value.length)
+
+function startNextTask() {
+  if (tasks.value.some((task) => task.status === 'running')) return
+  const next = tasks.value.find((task) => task.status === 'waiting')
+  if (next) { next.status = 'running'; next.progress = Math.max(3, next.progress) }
+}
+function createTasks() {
+  const selected = allVideos.value.filter((video) => selectedVideoIds.value.has(video.id))
+  if (!selected.length) return
+  selected.forEach((video) => tasks.value.push({
+    id: nextTaskId++, title: video.title, owner: creator.name, mode: batchAction.value,
+    status: 'waiting', progress: 0, size: '—',
+  }))
+  clearAll()
+  startNextTask()
+  notify(`已加入 ${selected.length} 个${taskNames[batchAction.value]}任务`)
+  page.value = 'tasks'
+}
+function addSingleTask() {
+  const mode = batchAction.value || 'video'
+  tasks.value.push({ id: nextTaskId++, title: singleVideo.title, owner: creator.name, mode, status: 'waiting', progress: 0, size: '—' })
+  startNextTask()
+  notify(`已加入${taskNames[mode]}任务`)
+  page.value = 'tasks'
+}
+function cancelTask(task) {
+  if (!['running', 'waiting'].includes(task.status)) return
+  task.status = 'cancelled'
+  notify(task.status === 'cancelled' ? '任务已取消' : '任务已取消')
+  startNextTask()
+}
+function clearHistory() {
+  const before = tasks.value.length
+  tasks.value = tasks.value.filter((task) => !['completed', 'failed', 'cancelled'].includes(task.status))
+  notify(before === tasks.value.length ? '暂无可清除的历史任务' : '已清除已完成和失败的任务')
+}
+function advanceProgress() {
+  const task = runningTask.value
+  if (!task) return
+  task.progress = Math.min(task.progress + 1, 100)
+  if (task.progress >= 100) {
+    task.status = 'completed'
+    task.size = task.mode === 'transcript' ? 'TXT · 18 KB' : task.mode === 'audio' ? 'MP3 · 36 MB' : '286 MB'
+    if (task.mode === 'transcript') addTranscript(task)
+    startNextTask()
+  }
+}
+
+const transcriptText = `今天我们先从最基础的地方开始讲，拿到一个八字，不要着急去判断这个人好还是不好。我们先把四柱摆清楚，年柱、月柱、日柱、时柱，每一个位置都代表不同的信息。\n\n日柱的天干是日主，也就是我们接下来分析时的中心。其他的天干地支，都是围绕日主来看的。你先记住这个顺序：先认日主，再看月令，然后看整个命局里面五行之间怎么流通。\n\n这个地方我们先不要急着下结论。看到一个五行多，不代表它一定就是好，也不能直接说少的那个就一定不好。还是要回到原局，看它在什么位置，跟其他干支是什么关系。我们学习的时候一步一步来，先把每个字认清楚，再慢慢把它们连起来。\n\n比如说现在这个盘，日主是甲木，我们先看月令是不是对它有帮助，再看地支里面有没有根，天干上有没有同类帮扶。这里说的旺衰，是一个基础的观察方法，不是最后的答案。后面我们还要结合十神、组合关系和大运流年来看。\n\n再往下看月令，月令是我们观察季节气候的一个入口。甲木生在不同的月份，它周围的环境不一样，不能拿同一把尺子直接量。看到这里，大家可以先停一下，把月支圈出来，想一想这个季节里面木的状态是什么。先说你看见了什么，再说它对日主有什么影响。\n\n地支里面还有藏干，所以一个地支不能只看表面那个字。我们把藏干写出来以后，再看这些字跟日主之间是什么关系。这个时候十神的概念就可以慢慢用起来了。刚开始记不住没有关系，我们先用表格查，重复几次以后，自然就熟悉了。\n\n大家容易遇到的一个问题，就是只盯着某一个字看。比如说看到一个冲，就马上觉得一定发生什么事情；看到一个合，就马上觉得它们都合住了。实际分析的时候，要把位置、力量和其他关系一起摆出来。现在先不用记复杂判断，我们先把每一步看完整。\n\n做案例的时候，先不要看答案。你按顺序把四柱写出来，标好阴阳和五行，再找日主和月令，最后把天干地支之间的关系连起来。把你看到的写在纸上，然后对照讲解，看看自己在哪一步漏了。这样练，比一上来背结论更有用。\n\n大家做练习的时候，可以先把四柱写出来，在旁边标上每个字的五行和阴阳。刚开始慢一点没有关系，把基础的步骤做对，后面分析才不会乱。今天这节课先到这里，下一节我们接着讲十天干的特点。`
+const transcripts = ref([
+  { id: 'tr-1', title: '八字入门第一课：四柱与五行基础概念', creator: '山间命理课', date: '2026-09-18', duration: '18:42', text: transcriptText },
+  { id: 'tr-2', title: '十神是什么？日主与其他天干的关系', creator: '山间命理课', date: '2026-09-06', duration: '21:36', text: transcriptText.replaceAll('日主', '日元') },
+  { id: 'tr-3', title: '排盘的基本方法：四柱怎么排', creator: '山间命理课', date: '2026-09-12', duration: '32:08', text: transcriptText.replaceAll('月令', '月支') },
+])
+const activeTranscriptId = ref('tr-1')
+const transcriptQuery = ref('')
+const visibleTranscripts = computed(() => transcripts.value.filter((item) => `${item.title} ${item.creator}`.toLowerCase().includes(transcriptQuery.value.trim().toLowerCase())))
+const activeTranscript = computed(() => transcripts.value.find((item) => item.id === activeTranscriptId.value) || transcripts.value[0])
+function addTranscript(task) {
+  const id = `tr-${Date.now()}`
+  transcripts.value.unshift({ id, title: task.title, creator: task.owner, date: new Date().toLocaleDateString('zh-CN'), duration: '18:42', text: transcriptText })
+}
+async function copyTranscript() {
+  try {
+    await navigator.clipboard.writeText(activeTranscript.value.text)
+    notify('全文已复制')
+  } catch { notify('浏览器未授权剪贴板，请手动选择正文复制') }
+}
+function exportTranscript() {
+  const file = new Blob([activeTranscript.value.text], { type: 'text/plain;charset=utf-8' })
+  const downloadUrl = URL.createObjectURL(file)
+  const link = document.createElement('a')
+  link.href = downloadUrl
+  link.download = `${activeTranscript.value.title}.txt`
+  link.click()
+  URL.revokeObjectURL(downloadUrl)
+  notify('TXT 已导出')
+}
+
+const loginState = ref(false)
+const qrDialog = ref(false)
+const apiKey = ref('')
+const apiSaved = ref(false)
+const apiTesting = ref(false)
+const apiTested = ref(false)
+const downloadPath = ref('D:\\BiliScribe\\视频')
+const transcriptPath = ref('D:\\BiliScribe\\文字稿')
+function saveSettings() { apiSaved.value = true; notify('设置已保存到当前演示会话') }
+function testApi() {
+  apiTesting.value = true
+  apiTested.value = false
+  setTimeout(() => { apiTesting.value = false; apiTested.value = true; notify('连接测试成功（演示）') }, 850)
+}
+function choosePath(which) {
+  if (which === 'video') downloadPath.value = 'D:\\BiliScribe\\视频'
+  else transcriptPath.value = 'D:\\BiliScribe\\文字稿'
+  notify('目录选择为演示交互，未访问本机文件')
+}
+
+onMounted(() => { progressTimer = setInterval(advanceProgress, 900) })
+onUnmounted(() => { clearInterval(progressTimer); clearTimeout(toastTimer) })
+</script>
+
+<template>
+  <div class="app-shell">
+    <aside class="sidebar">
+      <div class="brand-lockup">
+        <div class="brand-mark"><span></span><span></span><span></span></div>
+        <div class="brand-copy"><strong>BiliScribe</strong><span>视频 · 文字稿工作台</span></div>
+        <button class="icon-button sidebar-collapse" aria-label="收起侧边栏"><PanelLeftClose :size="17" /></button>
+      </div>
+
+      <div class="workspace-label">工作区</div>
+      <nav class="main-nav" aria-label="主导航">
+        <button v-for="item in navItems" :key="item.id" class="nav-item" :class="{ active: page === item.id }" @click="page = item.id">
+          <component :is="item.icon" :size="18" :stroke-width="1.8" />
+          <span>{{ item.label }}</span>
+          <span v-if="item.id === 'tasks' && queueCount" class="nav-badge">{{ queueCount + (runningTask ? 1 : 0) }}</span>
+        </button>
+      </nav>
+
+      <div class="sidebar-spacer"></div>
+      <div class="sidebar-queue-card">
+        <div class="queue-card-top"><span class="live-dot"></span><span>本地演示队列</span><span class="queue-count">{{ queueCount + (runningTask ? 1 : 0) }}</span></div>
+        <div class="queue-card-title">{{ runningTask ? '正在处理任务' : '队列空闲' }}</div>
+        <div class="queue-card-meta"><span>{{ runningTask ? taskNames[runningTask.mode] : '等待添加任务' }}</span><span v-if="runningTask">{{ runningTask.progress }}%</span></div>
+        <div v-if="runningTask" class="mini-progress"><span :style="{ width: `${runningTask.progress}%` }"></span></div>
+      </div>
+      <div class="sidebar-footer"><span class="avatar">B</span><div><strong>本机工作区</strong><span>仅前端原型</span></div><button class="icon-button"><MoreHorizontal :size="18" /></button></div>
+    </aside>
+
+    <main class="main-area">
+      <header class="topbar">
+        <div class="breadcrumbs"><span>工作区</span><ChevronRight :size="14" /><strong>{{ navItems.find((item) => item.id === page)?.label }}</strong></div>
+        <div class="topbar-actions"><span class="prototype-pill"><span></span>演示模式</span><button class="icon-button help-button" title="原型说明" @click="notify('当前版本使用演示数据，不会连接真实服务')"><CircleHelp :size="18" /></button></div>
+      </header>
+
+      <div class="page-scroll">
+        <section v-if="page === 'new'" class="page-content new-page">
+          <div class="page-heading">
+            <div><div class="eyebrow">BILISCRIBE WORKSPACE</div><h1>新建任务</h1><p>粘贴视频或 UP 主链接，选择你要处理的内容。</p></div>
+            <div class="heading-note"><ShieldCheck :size="16" /><span>所有操作均在本机进行</span></div>
+          </div>
+
+          <div class="link-panel panel">
+            <div class="link-panel-title"><div class="step-icon"><Link2 :size="18" /></div><div><strong>添加 B 站链接</strong><span>支持单个视频，也支持 UP 主主页</span></div><span class="supported-tag">Bilibili</span></div>
+            <div class="link-entry"><div class="url-input-wrap"><Link2 :size="17" /><input v-model="url" aria-label="B站视频或UP主链接" placeholder="粘贴 B 站视频链接或 UP 主主页链接" @keydown.enter="parseLink" /><button v-if="url" class="input-clear" aria-label="清空链接" @click="url = ''"><X :size="15" /></button></div><button class="primary-button parse-button" :disabled="isParsing" @click="parseLink"><LoaderCircle v-if="isParsing" class="spin" :size="16" /><Search v-else :size="16" />{{ isParsing ? '解析中' : '解析链接' }}</button></div>
+            <div class="demo-hints"><span class="hint-label">试试演示链接</span><button @click="url = 'https://www.bilibili.com/video/BV1xx411c7mD'; resultType = 'video'">单个视频</button><i></i><button @click="url = 'https://space.bilibili.com/349327328'; resultType = 'creator'">UP 主主页</button><span class="hint-footnote">解析结果为模拟数据</span></div>
+          </div>
+
+          <template v-if="resultType === 'creator'">
+            <div class="creator-panel panel">
+              <div class="creator-cover"><div class="creator-cover-decoration"></div><div class="creator-profile"><div class="creator-avatar">山<span class="verified"><Check :size="10" /></span></div><div class="creator-main"><div class="creator-name-row"><h2>{{ creator.name }}</h2><span class="up-tag">UP 主</span></div><div class="creator-description">{{ creator.description }}</div><div class="creator-id">UID：349327328 <span>·</span> 粉丝 {{ creator.followers }}</div></div></div><div class="creator-stats"><div><strong>{{ creator.videos }}</strong><span>视频</span></div><div><strong>{{ creator.collections }}</strong><span>合集</span></div></div></div>
+              <div class="creator-toolbar">
+                <div class="toolbar-left"><h3>视频与合集</h3><span class="toolbar-count">{{ creator.videos }} 个视频</span><span class="toolbar-divider"></span><button class="text-action" @click="selectAll"><CheckCheck :size="15" />全选全部</button><button class="text-action" @click="setVideos(pageVideos.map((v) => v.id), true)"><Check :size="15" />全选当前页</button><button class="text-action muted" @click="clearAll"><XCircle :size="15" />取消全部</button><button class="text-action muted" @click="setVideos(pageVideos.map((v) => v.id), false)"><X :size="15" />取消当前页</button></div>
+              </div>
+              <div class="selection-line"><label class="check-label"><input type="checkbox" :checked="pageAllSelected" @change="setVideos(pageVideos.map((v) => v.id), $event.target.checked)" /><span class="custom-check"><Check :size="12" /></span><span>本页全选</span></label><span>第 {{ currentPage }} 页 · {{ pageVideos.length }} 个视频</span><span v-if="selectedCount" class="selection-count">已选 {{ selectedCount }} 个</span></div>
+
+              <div class="album-list">
+                <article v-for="album in creatorPages[currentPage - 1]" :key="album.id" class="album-card">
+                  <div class="album-heading">
+                    <label class="album-check check-label" :title="`选择${album.title}内全部视频`"><input type="checkbox" :checked="albumChecked(album)" @change="toggleAlbumSelection(album)" /><span class="custom-check"><Check :size="12" /></span></label>
+                    <button class="album-cover thumb-art" :class="album.videos[0].art" @click="toggleAlbum(album)"><span class="art-orbit"></span><span class="art-copy"><small>{{ album.videos[0].tag }}</small><b>{{ album.title.split(' · ')[0] }}</b></span><span class="album-cover-count">{{ album.videos.length }} 集</span></button>
+                    <button class="album-info" @click="toggleAlbum(album)"><span class="album-title-row"><strong>{{ album.title }}</strong><span class="album-tag"><Archive :size="12" />合集</span></span><span class="album-subtitle">{{ album.updated }} <i>·</i> 山间命理课</span></button>
+                    <button class="album-expand" @click="toggleAlbum(album)"><span>{{ expandedAlbums.has(album.id) ? '收起' : '展开' }}</span><ChevronDown :size="16" :class="{ rotated: expandedAlbums.has(album.id) }" /></button>
+                  </div>
+                  <div v-if="expandedAlbums.has(album.id)" class="video-list">
+                    <div v-for="video in album.videos" :key="video.id" class="video-row" :class="{ selected: selectedVideoIds.has(video.id) }">
+                      <label class="check-label video-checkbox"><input type="checkbox" :checked="selectedVideoIds.has(video.id)" @change="toggleVideo(video.id)" /><span class="custom-check"><Check :size="12" /></span></label>
+                      <div class="video-thumb thumb-art" :class="video.art"><span class="art-orbit"></span><span class="art-copy"><small>{{ video.tag }}</small><b>{{ video.title.split('：')[0] }}</b></span><span class="thumb-duration">{{ video.duration }}</span></div>
+                      <div class="video-details"><strong>{{ video.title }}</strong><div class="video-meta"><span><UserRound :size="12" />山间命理课</span><span><CirclePlay :size="12" />{{ video.views }} 播放</span><span>{{ video.date }}</span></div></div>
+                      <div class="video-trailing"><span class="format-label"><Video :size="13" />视频</span><button class="icon-button row-more" title="更多操作"><MoreHorizontal :size="17" /></button></div>
+                    </div>
+                  </div>
+                </article>
+              </div>
+              <div class="list-footer"><div class="result-count">共 <strong>{{ allVideos.length }}</strong> 个演示视频，分为 <strong>{{ creatorPages.length }}</strong> 页</div><div class="pagination"><button class="page-arrow" :disabled="currentPage === 1" aria-label="上一页" @click="currentPage--"><ChevronLeft :size="16" /></button><button v-for="number in creatorPages.length" :key="number" class="page-number" :class="{ active: currentPage === number }" @click="currentPage = number">{{ number }}</button><button class="page-arrow" :disabled="currentPage === creatorPages.length" aria-label="下一页" @click="currentPage++"><ChevronRight :size="16" /></button><span class="page-total">共 {{ creatorPages.length }} 页</span></div></div>
+            </div>
+          </template>
+
+          <div v-else class="single-result panel">
+            <div class="section-heading"><div><div class="eyebrow">解析结果</div><h2>单个视频</h2></div><span class="result-chip"><Check :size="14" />已识别</span></div>
+            <div class="single-video-card"><div class="single-cover thumb-art" :class="singleVideo.art"><span class="art-orbit"></span><span class="art-copy"><small>山间命理课</small><b>四柱与五行<br />基础概念</b></span><span class="thumb-duration">{{ singleVideo.duration }}</span><span class="play-overlay"><Play :size="20" fill="currentColor" /></span></div><div class="single-video-info"><span class="video-eyebrow"><Radio :size="13" />视频解析成功</span><h3>{{ singleVideo.title }}</h3><div class="single-meta"><span><UserRound :size="14" />{{ creator.name }}</span><span>{{ singleVideo.date }}</span><span>{{ singleVideo.views }} 播放</span></div><div class="single-divider"></div><div class="mode-label">选择处理方式</div><div class="mode-options"><button v-for="mode in modeOptions" :key="mode.id" class="mode-option" :class="{ active: batchAction === mode.id }" @click="batchAction = mode.id"><component :is="mode.icon" :size="17" /><span>{{ mode.label }}</span><span class="mode-radio"><i></i></span></button></div><button class="primary-button single-action" @click="batchAction = batchAction || 'video'; addSingleTask()"><Plus :size="16" />创建任务</button></div></div>
+          </div>
+        </section>
+
+        <section v-else-if="page === 'tasks'" class="page-content tasks-page">
+          <div class="page-heading"><div><div class="eyebrow">TASK CENTER</div><h1>任务</h1><p>下载与转写按单队列串行执行，一次只处理一个任务。</p></div><button class="outline-button" @click="clearHistory"><Trash2 :size="15" />清除历史</button></div>
+          <div class="task-overview"><div class="overview-card active-overview"><div class="overview-icon"><Activity :size="18" /></div><div><span>当前执行</span><strong>{{ runningTask ? '1' : '0' }}<small> 个任务</small></strong></div><span class="overview-live"><i></i>单任务</span></div><div class="overview-card"><div class="overview-icon queue"><Clock3 :size="18" /></div><div><span>等待队列</span><strong>{{ queueCount }}<small> 个任务</small></strong></div></div><div class="overview-card"><div class="overview-icon done"><Check :size="18" /></div><div><span>已完成</span><strong>{{ completedCount }}<small> 个任务</small></strong></div></div><div class="serial-note"><LockKeyhole :size="16" /><span>串行处理</span><small>当前任务完成后自动开始下一项</small></div></div>
+          <div class="task-section panel"><div class="task-toolbar"><div class="filter-tabs"><button v-for="filter in taskFilters" :key="filter" :class="{ active: taskFilter === filter }" @click="taskFilter = filter">{{ filter }}<span v-if="filter === '等待' && queueCount">{{ queueCount }}</span></button></div></div>
+            <div v-if="taskFilter === '全部' || taskFilter === '进行中'" class="task-group"><div class="task-group-heading"><div><span class="group-dot running"></span><strong>正在执行</strong><span class="group-hint">当前唯一任务</span></div><span class="group-count">{{ runningTask ? '01' : '00' }}</span></div><div v-if="runningTask" class="task-row running-row"><div class="task-type-icon" :class="runningTask.mode"><component :is="taskIcon[runningTask.mode]" :size="18" /></div><div class="task-main"><div class="task-title-row"><strong>{{ runningTask.title }}</strong><span class="task-status running"><LoaderCircle class="spin" :size="12" />正在{{ taskNames[runningTask.mode] }}</span></div><div class="task-subtitle">{{ runningTask.owner }} <i>·</i> {{ taskNames[runningTask.mode] }} <i>·</i> {{ runningTask.mode === 'transcript' ? 'MiMo V2.6 Flash' : '演示任务' }}</div><div class="task-progress-line"><div class="progress-track"><span :style="{ width: `${runningTask.progress}%` }"></span></div><span>{{ runningTask.progress }}%</span><small>{{ runningTask.size }}</small></div></div><button class="cancel-button" @click="cancelTask(runningTask)"><X :size="14" />取消</button></div><div v-else class="empty-inline"><CheckCheck :size="18" />当前没有正在执行的任务</div></div>
+            <div v-if="taskFilter === '全部' || taskFilter === '等待'" class="task-group"><div class="task-group-heading"><div><span class="group-dot waiting"></span><strong>等待队列</strong><span class="group-hint">按加入顺序执行</span></div><span class="group-count">{{ String(waitingTasks.length).padStart(2, '0') }}</span></div><div v-if="waitingTasks.length" class="waiting-list"><div v-for="(task, index) in waitingTasks" :key="task.id" class="task-row waiting-row"><div class="queue-index">{{ String(index + 1).padStart(2, '0') }}</div><div class="task-type-icon" :class="task.mode"><component :is="taskIcon[task.mode]" :size="18" /></div><div class="task-main"><div class="task-title-row"><strong>{{ task.title }}</strong><span class="task-status waiting"><Clock3 :size="12" />等待中</span></div><div class="task-subtitle">{{ task.owner }} <i>·</i> {{ taskNames[task.mode] }} <i>·</i> 加入队列</div></div><button class="cancel-button" @click="cancelTask(task)"><X :size="14" />取消</button></div></div><div v-else class="empty-inline"><Clock3 :size="18" />队列中没有等待任务</div></div>
+            <div v-if="taskFilter !== '进行中' && taskFilter !== '等待'" class="task-group history-group"><div class="task-group-heading"><div><span class="group-dot history"></span><strong>任务记录</strong><span class="group-hint">已完成与失败</span></div><span class="group-count">{{ String(filteredTasks.filter((task) => ['completed', 'failed', 'cancelled'].includes(task.status)).length).padStart(2, '0') }}</span></div><div v-if="filteredTasks.some((task) => ['completed', 'failed', 'cancelled'].includes(task.status))" class="history-list"><div v-for="task in filteredTasks.filter((item) => ['completed', 'failed', 'cancelled'].includes(item.status))" :key="task.id" class="task-row history-row"><div class="task-type-icon" :class="task.mode"><component :is="taskIcon[task.mode]" :size="18" /></div><div class="task-main"><div class="task-title-row"><strong>{{ task.title }}</strong><span class="task-status" :class="task.status"><Check v-if="task.status === 'completed'" :size="12" /><XCircle v-else :size="12" />{{ task.status === 'completed' ? '已完成' : task.status === 'failed' ? '失败' : '已取消' }}</span></div><div class="task-subtitle">{{ task.owner }} <i>·</i> {{ taskNames[task.mode] }} <i>·</i> {{ task.size }}</div></div></div></div><div v-else class="empty-inline"><History :size="18" />暂无符合条件的历史记录</div></div>
+          </div>
+          <div class="task-footnote"><Zap :size="14" /><span>为避免占用过多系统资源，第一版只允许一个下载或转写任务运行；取消当前任务后将自动继续队列。</span></div>
+        </section>
+
+        <section v-else-if="page === 'transcripts'" class="page-content transcripts-page">
+          <div class="page-heading"><div><div class="eyebrow">TRANSCRIPT LIBRARY</div><h1>文字稿</h1><p>查看、复制或导出已完成的文字稿。</p></div><div class="transcript-total"><BookOpenText :size="16" /><strong>{{ transcripts.length }}</strong> 篇文字稿</div></div>
+          <div class="transcript-workspace panel"><aside class="transcript-sidebar"><div class="transcript-sidebar-head"><div><strong>全部文字稿</strong><span>{{ transcripts.length }} 篇</span></div><button class="icon-button" title="搜索文字稿"><Search :size="16" /></button></div><div class="transcript-search"><Search :size="15" /><input v-model="transcriptQuery" placeholder="搜索标题或 UP 主" /></div><div class="transcript-items"><button v-for="item in visibleTranscripts" :key="item.id" class="transcript-item" :class="{ active: activeTranscriptId === item.id }" @click="activeTranscriptId = item.id"><span class="transcript-item-icon"><FileText :size="16" /></span><span class="transcript-item-copy"><strong>{{ item.title }}</strong><small>{{ item.creator }} <i>·</i> {{ item.date }}</small></span><ChevronRight :size="15" class="transcript-item-arrow" /></button><div v-if="!visibleTranscripts.length" class="transcript-no-results">没有找到匹配的文字稿</div></div><div class="transcript-sidebar-foot"><span class="storage-icon"><HardDriveDownload :size="15" /></span><span>文字稿保存位置</span><button @click="page = 'settings'">查看设置<ChevronRight :size="13" /></button></div></aside>
+            <article class="transcript-reader"><div class="reader-top"><div class="reader-breadcrumb"><FileText :size="15" /><span>文字稿</span><ChevronRight :size="13" /><strong>{{ activeTranscript.title }}</strong></div><div class="reader-actions"><button class="outline-button" @click="copyTranscript"><Copy :size="15" />复制全文</button><button class="primary-button export-button" @click="exportTranscript"><Download :size="15" />导出 TXT</button></div></div><div class="reader-document"><div class="document-type"><span>课程转写</span><span class="document-dot"></span><span>演示正文</span></div><h2>{{ activeTranscript.title }}</h2><div class="document-meta"><span><UserRound :size="14" />{{ activeTranscript.creator }}</span><span><CalendarIcon />{{ activeTranscript.date }}</span><span><Clock3 :size="14" />{{ activeTranscript.duration }}</span></div><div class="document-rule"></div><div class="transcript-body"><p v-for="(paragraph, index) in activeTranscript.text.split('\n\n')" :key="index">{{ paragraph }}</p></div><div class="document-end"><span></span><small>正文结束</small><span></span></div></div><div class="reader-footer"><span><ShieldCheck :size="14" />保留讲师原话 · 未做总结和改写</span><span>共 {{ activeTranscript.text.length }} 字</span></div></article></div>
+        </section>
+
+        <section v-else class="page-content settings-page">
+          <div class="page-heading"><div><div class="eyebrow">PREFERENCES</div><h1>设置</h1><p>管理登录状态、转写服务和文件保存位置。</p></div><button class="primary-button save-settings" @click="saveSettings"><Check :size="16" />保存设置</button></div>
+          <div class="settings-layout"><aside class="settings-nav panel"><span class="settings-nav-label">偏好设置</span><a class="settings-nav-item active"><UserRound :size="16" />账号与服务</a><a class="settings-nav-item"><FolderOpen :size="16" />文件与目录</a><a class="settings-nav-item"><SlidersIcon />任务处理</a><div class="settings-nav-divider"></div><div class="settings-nav-help"><CircleHelp :size="16" /><span>遇到问题？<small>查看使用说明</small></span><ExternalLink :size="13" /></div></aside><div class="settings-content">
+            <section class="settings-card panel"><div class="settings-card-heading"><div class="settings-heading-icon bilibili-icon">哔</div><div><h2>B 站账号</h2><p>登录后可访问需要登录的视频内容</p></div><span class="settings-status" :class="loginState ? 'ok' : 'off'"><i></i>{{ loginState ? '已登录' : '未登录' }}</span></div><div class="setting-divider"></div><div class="account-row"><div class="account-avatar">{{ loginState ? '山' : 'B' }}<span :class="{ online: loginState }"></span></div><div class="account-info"><strong>{{ loginState ? creator.name : '尚未登录 B 站' }}</strong><span>{{ loginState ? 'UID：349327328' : '扫码登录以使用完整解析能力' }}</span></div><button class="outline-button account-button" @click="qrDialog = true"><ScanLine :size="15" />{{ loginState ? '重新登录' : '扫码登录' }}</button></div><div class="settings-tip"><ShieldCheck :size="15" /><span>扫码登录状态仅保存在本机。原型阶段不会向 B 站发起请求。</span></div></section>
+            <section class="settings-card panel"><div class="settings-card-heading"><div class="settings-heading-icon model-icon"><Sparkles :size="18" /></div><div><h2>文字稿模型</h2><p>用于将视频音频转换为课程文字稿</p></div><span class="fixed-tag"><LockKeyhole :size="12" />固定模型</span></div><div class="model-field"><label>模型</label><div class="model-select"><span class="model-dot"></span><strong>MiMo V2.6 Flash</strong><span class="model-subtle">快速 · 低成本</span><ChevronDown :size="16" /></div><small>转写结果忠实保留原话，不总结、不重写。</small></div><div class="api-key-field"><div class="api-label"><label for="api-key">MiMo API Key</label><a href="#" @click.prevent="notify('API Key 申请链接为演示内容')">如何获取？<ExternalLink :size="12" /></a></div><div class="api-input-row"><div class="key-input"><KeyRound :size="16" /><input id="api-key" v-model="apiKey" type="password" autocomplete="off" placeholder="输入你的 API Key" @input="apiSaved = false; apiTested = false" /></div><button class="outline-button test-api-button" :disabled="apiTesting" @click="testApi"><LoaderCircle v-if="apiTesting" class="spin" :size="15" /><Activity v-else :size="15" />{{ apiTesting ? '测试中' : '测试连接' }}</button></div><div class="api-feedback"><span v-if="apiTested" class="success-text"><Check :size="13" />连接成功（演示）</span><span v-else-if="apiSaved" class="success-text"><Check :size="13" />已保存到当前演示会话</span><span v-else><LockKeyhole :size="12" />密钥仅用于界面演示，不会发送或保存到服务器</span></div></div></section>
+            <section class="settings-card panel"><div class="settings-card-heading"><div class="settings-heading-icon folder-icon"><FolderOpen :size="18" /></div><div><h2>文件与目录</h2><p>设置下载文件和文字稿的保存位置</p></div></div><div class="setting-divider"></div><div class="path-setting"><div><label>视频与音频目录</label><span>下载完成的媒体文件保存位置</span></div><div class="path-control"><input v-model="downloadPath" aria-label="视频与音频目录" /><button class="outline-button path-button" @click="choosePath('video')"><FolderOpen :size="15" />选择</button></div></div><div class="path-setting"><div><label>文字稿目录</label><span>转写完成后导出的 TXT 文件位置</span></div><div class="path-control"><input v-model="transcriptPath" aria-label="文字稿目录" /><button class="outline-button path-button" @click="choosePath('transcript')"><FolderOpen :size="15" />选择</button></div></div><div class="settings-tip folder-tip"><HardDriveDownload :size="15" /><span>原型中显示的是示例路径，不会读写本机文件。</span></div></section>
+            <section class="settings-card compact-settings panel"><div class="settings-card-heading"><div class="settings-heading-icon queue-icon"><ListChecks :size="18" /></div><div><h2>任务队列</h2><p>下载与转写任务使用同一个串行队列</p></div></div><div class="queue-setting-line"><span>同时执行的任务</span><span class="serial-value"><span class="live-dot"></span>1 个任务 <span class="locked-mini"><LockKeyhole :size="11" />第一版固定</span></span></div></section>
+          </div></div>
+        </section>
+      </div>
+    </main>
+
+    <div v-if="page === 'new' && resultType === 'creator' && selectedCount" class="batch-bar"><div class="batch-selection"><div class="batch-selected-icon"><Check :size="16" /></div><div><strong>已选择 {{ selectedCount }} 个视频</strong><button @click="clearAll">清空选择</button></div></div><span class="batch-divider"></span><div class="batch-action-select"><span>添加为</span><button v-for="mode in modeOptions" :key="mode.id" :class="{ active: batchAction === mode.id }" @click="batchAction = mode.id"><component :is="mode.icon" :size="15" />{{ mode.label }}<span class="radio-dot"><i></i></span></button></div><button class="primary-button batch-create" @click="createTasks"><Plus :size="16" />创建 {{ selectedCount }} 个任务</button></div>
+
+    <div v-if="qrDialog" class="modal-backdrop" @click.self="qrDialog = false"><div class="login-modal panel"><button class="icon-button modal-close" aria-label="关闭" @click="qrDialog = false"><X :size="18" /></button><div class="login-modal-icon"><ScanLine :size="22" /></div><h2>扫码登录 B 站</h2><p>打开哔哩哔哩 App，扫描二维码完成登录</p><div class="fake-qr" aria-label="演示二维码"><span v-for="cell in 81" :key="cell" :class="{ dark: [1,2,3,4,9,13,17,18,19,21,23,25,27,29,31,33,35,37,39,41,43,45,47,49,51,53,55,57,59,61,63,65,67,69,71,73,75,77,78,79,80,81].includes(cell) }"></span><div class="qr-center">B</div></div><div class="qr-note"><span class="live-dot"></span>等待扫码 · 演示状态</div><button class="primary-button simulate-login" @click="loginState = true; qrDialog = false; notify('已模拟扫码登录成功')"><Check :size="16" />模拟扫码成功</button><small class="modal-disclaimer">仅改变界面状态，不会连接 B 站</small></div></div>
+
+    <Transition name="toast"><div v-if="toast" class="toast-message"><Check :size="15" />{{ toast }}</div></Transition>
+  </div>
+</template>
