@@ -7,7 +7,10 @@ import os from 'node:os'
 import { createHash, randomBytes, randomUUID } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 import { getLogDirectory, getLogPath, log, readCompleteLog, readRecentLogLines } from './logger.js'
-import { isAdaptiveTranscriptError, planAdaptiveTranscriptSplit, replaceAdaptiveTranscriptSegment } from './transcript-adaptive.js'
+import {
+  ensureTranscriptSegmentTimeRanges, formatTranscriptTimeRange, isAdaptiveTranscriptError,
+  planAdaptiveTranscriptSplit, replaceAdaptiveTranscriptSegment,
+} from './transcript-adaptive.js'
 
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const configuredExe = process.env.BBDOWN_PATH || path.join(projectRoot, 'tools', 'BBDownNext', 'BBDown.exe')
@@ -33,6 +36,8 @@ const transcriptMaxBase64Bytes = 40_000_000
 const transcriptSegmentSafetyBase64Bytes = 38_000_000
 const transcriptBitrate = '32k'
 const transcriptMaxSplitDepth = 10
+const transcriptMaxContentFilterSplitDepth = 4
+const transcriptMinimumContentFilterSegmentSeconds = 1
 const transcriptMinimumAdaptiveSegmentSeconds = 8 * 60
 const transcriptProcessingVersion = 2
 const transcriptConnectTimeoutMs = 30_000
@@ -1285,7 +1290,7 @@ function readTranscriptCheckpoint(directory, taskId) {
   try {
     const saved = JSON.parse(fs.readFileSync(path.join(directory, 'state.json'), 'utf8'))
     if (saved.taskId !== taskId || !Array.isArray(saved.segments) || !Array.isArray(saved.completedSegments)) return null
-    if (saved.segments.some((item) => !item || !/^\d{3}[ab]{0,10}$/.test(item.id || ''))) return null
+    if (saved.segments.some((item) => !item || !/^\d{3}[ab]{0,14}$/.test(item.id || ''))) return null
     return saved
   } catch (error) {
     if (error.code !== 'ENOENT') log('warn', 'Transcript checkpoint could not be loaded', { code: error.code || 'checkpoint_read_failed' })
@@ -1299,7 +1304,7 @@ async function clearTranscriptCheckpoint(directory) {
   if (!resolvedDirectory.startsWith(`${resolvedRoot}${path.sep}`)) throw transcriptFailure('unsafe_checkpoint_path', '转写临时目录路径无效。')
   const names = await fs.promises.readdir(directory).catch(() => [])
   for (const name of names) {
-    if (/^segment-\d{3}[ab]{0,10}(?:\.partial)?\.(?:m4a|mp3|txt)(?:\.\d+\.tmp)?$/i.test(name) || name === 'state.json') {
+    if (/^segment-\d{3}[ab]{0,14}(?:\.partial)?\.(?:m4a|mp3|txt)(?:\.\d+\.tmp)?$/i.test(name) || name === 'state.json') {
       await fs.promises.rm(path.join(directory, name), { force: true })
     }
   }
@@ -1496,7 +1501,12 @@ async function callMiMoForSegmentUnlocked(task, prompt, filePath, index, count) 
           error.finishReason = finishReason
           throw error
         }
-        if (finishReason === 'content_filter') throw transcriptFailure('mimo_content_filtered', 'MiMo 安全过滤阻止了本段返回；不会自动重复请求，请检查音频后重试。')
+        if (finishReason === 'content_filter') {
+          const error = transcriptFailure('mimo_content_filtered', 'MiMo 安全过滤阻止了本段返回，正在拆分音频片段后重试。')
+          error.generatedCharacterCount = characterCount
+          error.finishReason = finishReason
+          throw error
+        }
         throw transcriptFailure('mimo_incomplete_response', 'MiMo 未能完整返回本段文字稿，请重试。')
       }
       await outputHandle.close()
@@ -1664,15 +1674,30 @@ async function selectLocalAudio(response, kind) {
 }
 
 function transcriptSegmentFilename(segment) {
-  if (!/^\d{3}[ab]{0,10}$/.test(segment.id)) throw transcriptFailure('invalid_segment_id', '转写分段编号无效。')
+  if (!/^\d{3}[ab]{0,14}$/.test(segment.id)) throw transcriptFailure('invalid_segment_id', '转写分段编号无效。')
   return `segment-${segment.id}.m4a`
 }
 
 async function splitTranscriptSegment(task, ffmpegPath, workDirectory, segment, reasonCode = 'mimo_output_truncated') {
   const segmentDirectory = path.join(workDirectory, 'audio-segments')
   const inputPath = path.join(segmentDirectory, transcriptSegmentFilename(segment))
-  const splitPlan = planAdaptiveTranscriptSplit(segment, transcriptMinimumAdaptiveSegmentSeconds, transcriptMaxSplitDepth)
+  const isContentFilterSplit = reasonCode === 'mimo_content_filtered'
+  const contentFilterSplitDepth = segment.contentFilterSplitDepth || 0
+  const depthForPlan = isContentFilterSplit ? contentFilterSplitDepth : segment.splitDepth || 0
+  const splitPlan = planAdaptiveTranscriptSplit(
+    { ...segment, splitDepth: depthForPlan },
+    isContentFilterSplit ? transcriptMinimumContentFilterSegmentSeconds : transcriptMinimumAdaptiveSegmentSeconds,
+    isContentFilterSplit ? transcriptMaxContentFilterSplitDepth : transcriptMaxSplitDepth,
+  )
   if (!splitPlan.canSplit) {
+    if (isContentFilterSplit) {
+      const error = transcriptFailure(
+        'mimo_content_filter_split_limit',
+        `MiMo 安全过滤多次阻止转写，失败时间范围：${formatTranscriptTimeRange(segment)}。已达到自动细分限制，请检查该段音频。`,
+      )
+      error.adaptiveSplitReason = splitPlan.reason
+      throw error
+    }
     if (reasonCode === 'mimo_repetition_truncation') {
       throw transcriptFailure('mimo_repetition_truncation_terminal', '该段音频质量较差，MiMo 多次检测到重复生成。已缩小片段仍无法稳定转写，请检查源音频。')
     }
@@ -1682,7 +1707,9 @@ async function splitTranscriptSegment(task, ffmpegPath, workDirectory, segment, 
   await runTranscriptProcess(task, ffmpegPath, [
     '-hide_banner', '-loglevel', 'error', '-y', '-i', inputPath, '-map', '0:a:0', '-vn', '-ac', '1', '-ar', '16000', '-c:a', 'aac', '-b:a', transcriptBitrate,
     '-f', 'segment', '-segment_format', 'mp4', '-segment_time', splitPlan.childDurationSeconds.toFixed(3), '-segment_start_number', '1', '-reset_timestamps', '1', splitPattern,
-  ], reasonCode === 'mimo_repetition_truncation' ? '检测到重复生成，正在缩小音频片段…' : '音频处理中')
+  ], reasonCode === 'mimo_repetition_truncation'
+    ? '检测到重复生成，正在缩小音频片段…'
+    : reasonCode === 'mimo_content_filtered' ? 'MiMo 安全过滤，正在拆分音频片段…' : '音频处理中')
   const staged = (await fs.promises.readdir(segmentDirectory))
     .filter((name) => name.startsWith(`segment-${segment.id}-split-`) && name.endsWith('.m4a'))
     .sort((left, right) => left.localeCompare(right, 'en'))
@@ -1691,6 +1718,10 @@ async function splitTranscriptSegment(task, ffmpegPath, workDirectory, segment, 
     throw transcriptFailure('transcript_segment_split_failed', '无法将被截断的音频片段安全拆分。')
   }
   const children = []
+  let childStartSeconds = Number.isFinite(segment.startSeconds) ? segment.startSeconds : 0
+  const parentEndSeconds = Number.isFinite(segment.endSeconds) ? segment.endSeconds : null
+  const nextSegmentDepth = (segment.splitDepth || 0) + 1
+  const nextContentFilterDepth = isContentFilterSplit ? splitPlan.nextDepth : contentFilterSplitDepth
   for (let index = 0; index < staged.length; index += 1) {
     const id = `${segment.id}${index === 0 ? 'a' : 'b'}`
     const audioFile = `segment-${id}.m4a`
@@ -1699,10 +1730,17 @@ async function splitTranscriptSegment(task, ffmpegPath, workDirectory, segment, 
     await fs.promises.rename(stagedPath, finalPath)
     const stats = await fs.promises.stat(finalPath)
     if (Math.ceil(stats.size / 3) * 4 > transcriptMaxBase64Bytes) throw transcriptFailure('audio_segment_too_large', '细分后的音频仍超过 MiMo Base64 安全大小。')
+    const measuredDurationSeconds = probeAudioDuration(ffmpegPath, finalPath) || splitPlan.childDurationSeconds
+    const childEndSeconds = index === staged.length - 1 && parentEndSeconds !== null
+      ? parentEndSeconds
+      : childStartSeconds + measuredDurationSeconds
+    const childDurationSeconds = Math.max(0, childEndSeconds - childStartSeconds)
     children.push({
-      id, audioFile, durationSeconds: probeAudioDuration(ffmpegPath, finalPath) || splitPlan.childDurationSeconds,
-      splitDepth: splitPlan.nextDepth, sizeBytes: stats.size,
+      id, audioFile, startSeconds: childStartSeconds, endSeconds: childEndSeconds,
+      durationSeconds: childDurationSeconds, splitDepth: nextSegmentDepth,
+      contentFilterSplitDepth: nextContentFilterDepth, sizeBytes: stats.size,
     })
+    childStartSeconds = childEndSeconds
   }
   return children
 }
@@ -1865,6 +1903,7 @@ async function runTranscriptTask(task) {
         if (!finalNames.length || finalNames.some((name) => Math.ceil(fs.statSync(path.join(segmentDirectory, name)).size / 3) * 4 > transcriptMaxBase64Bytes)) {
           throw transcriptFailure('audio_segment_too_large', '音频无法安全切分到 MiMo Base64 限制以内。')
         }
+        let timelineStartSeconds = 0
         for (let index = 0; index < finalNames.length; index += 1) {
           const audioFile = finalNames[index]
           const stats = await fs.promises.stat(path.join(segmentDirectory, audioFile))
@@ -1872,8 +1911,10 @@ async function runTranscriptTask(task) {
           const segmentDuration = probeAudioDuration(ffmpegPath, path.join(segmentDirectory, audioFile)) || durationSeconds / finalNames.length
           segments.push({
             id: String(index + 1).padStart(3, '0'), audioFile,
+            startSeconds: timelineStartSeconds, endSeconds: timelineStartSeconds + segmentDuration,
             durationSeconds: segmentDuration, splitDepth: 0, sizeBytes: stats.size,
           })
+          timelineStartSeconds += segmentDuration
           log('info', 'Transcript audio segment prepared', {
             taskId: task.id, bvid: task.bvid, segment: index + 1, segmentCount: finalNames.length,
             durationSeconds: Math.round(segmentDuration * 100) / 100, fileSize: stats.size, base64Size,
@@ -1893,6 +1934,7 @@ async function runTranscriptTask(task) {
     }
 
     segments = [...checkpoint.segments]
+    ensureTranscriptSegmentTimeRanges(segments)
     const completed = new Set(checkpoint.completedSegments.filter((id) => segments.some((segment) => segment.id === id)))
     for (const segment of segments) {
       if (fs.existsSync(path.join(ownedWorkDirectory, `segment-${segment.id}.txt`))) completed.add(segment.id)
@@ -1941,6 +1983,15 @@ async function runTranscriptTask(task) {
         if (!isAdaptiveTranscriptError(error.code)) throw error
         const reasonCode = error.code
         if (reasonCode === 'mimo_repetition_truncation') setTranscriptPhase(task, '检测到重复生成，正在缩小音频片段…')
+        if (reasonCode === 'mimo_content_filtered') {
+          setTranscriptPhase(task, 'MiMo 安全过滤，正在拆分音频片段…')
+          log('info', 'content_filter_split_start', {
+            taskId: task.id, segmentId: segment.id,
+            timeRange: formatTranscriptTimeRange(segment),
+            splitDepth: segment.contentFilterSplitDepth || 0,
+            finishReason: error.finishReason || 'content_filter',
+          })
+        }
         let children
         try {
           children = await splitTranscriptSegment(task, ffmpegPath, ownedWorkDirectory, segment, reasonCode)
@@ -1954,13 +2005,36 @@ async function runTranscriptTask(task) {
               childSegmentDurationsSeconds: [],
             })
           }
+          if (reasonCode === 'mimo_content_filtered') {
+            log('warn', 'content_filter_split_failed', {
+              taskId: task.id, segmentId: segment.id,
+              timeRange: formatTranscriptTimeRange(segment),
+              splitDepth: segment.contentFilterSplitDepth || 0,
+              finishReason: error.finishReason || 'content_filter',
+              failureReason: splitError.adaptiveSplitReason || splitError.code || 'split_failed',
+            })
+          }
           throw splitError
         }
         replaceAdaptiveTranscriptSegment(segments, cursor, children, checkpoint, completed)
         task.transcriptProgress = { completedSegments: completed.size, segmentCount: segments.length, currentSegment: children[0].id }
         saveTranscriptCheckpoint(ownedWorkDirectory, checkpoint)
         await fs.promises.rm(path.join(segmentDirectory, transcriptSegmentFilename(segment)), { force: true })
-        log('warn', reasonCode === 'mimo_repetition_truncation' ? 'MiMo repetition truncation split for retry' : 'Truncated transcript segment split for retry', {
+        if (reasonCode === 'mimo_content_filtered') {
+          log('info', 'content_filter_split_success', {
+            taskId: task.id, segmentId: segment.id,
+            timeRange: formatTranscriptTimeRange(segment),
+            splitDepth: segment.contentFilterSplitDepth || 0,
+            childSegments: children.map((child) => ({
+              segmentId: child.id,
+              timeRange: formatTranscriptTimeRange(child),
+            })),
+          })
+        }
+        const splitEvent = reasonCode === 'mimo_repetition_truncation' ? 'MiMo repetition truncation split for retry'
+          : reasonCode === 'mimo_content_filtered' ? 'MiMo content-filter segment split for retry'
+            : 'Truncated transcript segment split for retry'
+        log('warn', splitEvent, {
           taskId: task.id, bvid: task.bvid, segmentId: segment.id, segmentCount: segments.length,
           ...(reasonCode === 'mimo_repetition_truncation' ? {
             segmentDurationSeconds: segment.durationSeconds,

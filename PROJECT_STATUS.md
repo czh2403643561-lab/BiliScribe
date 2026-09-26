@@ -14,21 +14,21 @@
 - 本地音频支持 mp3、m4a、wav、flac、ogg；文件夹只扫描当前层级，标题可编辑，TXT 保存到“本地导入/课程名”或“本地导入/未分组”。本机路径只保存在后台状态中，任务 API 返回时会隐藏路径。
 - MiMo 遇到 `repetition_truncation` 或 `length` 时只自适应拆分当前失败片段；整段请求仍优先，成功片段立即写入 checkpoint 并在重试时复用。动态拆分最小子段为 8 分钟，重复截断达到下限时显示明确的音频质量错误。
 - 重复截断诊断日志只记录任务 ID、片段时长/层级、生成字符数、finish reason 和子段时长，不记录正文；纯数字用量字段使用 `completionTokenCount`。
+- MiMo `content_filter` 会自动二分当前失败片段，左右子片段继续走现有串行转写和 checkpoint；按 content-filter 专属递归深度最多拆 4 层，失败时记录音频时间范围并显示明确提示。
+- 音频段 checkpoint 保存源音频时间范围；content-filter 拆分有 `content_filter_split_start`、`content_filter_split_success`、`content_filter_split_failed` 三类诊断事件，不记录转写正文。
 - UP 主主页合集展开显示合集内全部子视频；搜索时仅显示合集内匹配项，合集勾选继续作用于当前匹配的视频。
 - 展开的合集子视频列表使用视口适配的内部滚动区；合集标题栏保持在滚动区外可见，收起后不保留展开高度。
 - UP 主解析页“投稿视频”统计使用完整 `creatorData.videos.length`；合集/系列统计保持合集数量。
 
 ## 当前验证
 
-- 本次 `npm run build`、`node --check server/api.js`、`node --test server/transcript-adaptive.test.js`（4 项模拟）和 `git diff --check` 通过。
-- 合集分页修复后 `npm run build` 和 `git diff --check` 通过。
-- 合集展开滚动体验优化后 `npm run build` 和 `git diff --check` 通过。
-- UP 主投稿视频数量修复后 `npm run build` 和 `git diff --check` 通过。
+- 本次 `npm run build`、`node --check server/api.js`、`node --check server/transcript-adaptive.js`、`node --test server/transcript-adaptive.test.js`（6 项模拟）和 `git diff --check` 通过。
 - production 服务由 `npm run start` 启动，健康接口与 `/api/tasks` 返回 200；浏览器中已验证来源切换和本地音频页面。
 - 原生选择器子进程已启动；当前 UI 控制工具无法操作 Windows 原生窗口，因此未完成实际多选、文件夹扫描和不支持格式的交互验收。
-- 未创建转写任务，未调用 MiMo，未运行长课程测试；BiliScribe.vbs 启动命令被本机执行策略拦截，未能验证本次构建的 VBS 启动。
+- 本次未进行真实 MiMo 调用，未运行长课程测试；BiliScribe.vbs 启动命令被本机执行策略拦截，尚未完成 VBS 启动验证。
 
 ## 下一步
 
 - 在可控制 Windows 原生窗口的环境完成文件/文件夹选择及本地转写验收，并验证 VBS 启动。
 - 后续通过真实音频观察自动缩片与 checkpoint 恢复；避免重复运行 77 分钟课程，短音频 `stop` 路径仍保持单次完整请求。
+- 后续可在短音频上观察 content-filter 自动拆分与恢复；不要用长课程重复测试。
