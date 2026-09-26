@@ -11,7 +11,7 @@ import {
   ensureTranscriptSegmentTimeRanges, formatTranscriptTimeRange, isAdaptiveTranscriptError,
   planAdaptiveTranscriptSplit, replaceAdaptiveTranscriptSegment,
 } from './transcript-adaptive.js'
-import { cleanTranscriptText } from './transcript-text.js'
+import { analyzeTranscriptOutput, cleanTranscriptText } from './transcript-text.js'
 
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const configuredExe = process.env.BBDOWN_PATH || path.join(projectRoot, 'tools', 'BBDownNext', 'BBDown.exe')
@@ -33,6 +33,7 @@ const secretsFile = path.join(stateDirectory, 'secrets.json')
 const transcriptsFile = path.join(stateDirectory, 'transcripts.json')
 const transcriptWorkDirectory = path.join(stateDirectory, 'transcript-work')
 const transcriptPromptFile = path.join(projectRoot, 'prompts', 'bazi-transcript.md')
+const transcriptPromptVersion = 'transcript-v1'
 const transcriptMaxBase64Bytes = 40_000_000
 const transcriptSegmentSafetyBase64Bytes = 38_000_000
 const transcriptBitrate = '32k'
@@ -1340,15 +1341,29 @@ function transcriptErrorForStatus(status) {
   return transcriptFailure(`mimo_http_${status}`, `MiMo 请求失败（HTTP ${status}）。`)
 }
 
-async function callMiMoForSegment(task, prompt, filePath, index, count) {
-  return withMiMoRequestLock(() => callMiMoForSegmentUnlocked(task, prompt, filePath, index, count))
+async function callMiMoForSegment(task, prompt, filePath, index, count, segment, ffmpegPath) {
+  return withMiMoRequestLock(() => callMiMoForSegmentUnlocked(task, prompt, filePath, index, count, segment, ffmpegPath))
 }
 
-async function callMiMoForSegmentUnlocked(task, prompt, filePath, index, count) {
+async function callMiMoForSegmentUnlocked(task, prompt, filePath, index, count, segment, ffmpegPath) {
   if (!mimoApiKey) throw transcriptFailure('mimo_key_missing', '请先在设置中配置 MiMo API Key。')
   const fileStats = await fs.promises.stat(filePath)
   const base64Size = Math.ceil(fileStats.size / 3) * 4
   if (base64Size > transcriptMaxBase64Bytes) throw transcriptFailure('audio_segment_too_large', '音频片段超过 MiMo Base64 安全大小。')
+  const audioDiagnostics = probeAudioDiagnostics(ffmpegPath, filePath, segment?.durationSeconds)
+  const taskWorkDirectory = path.resolve(transcriptWorkDirectory, task.id)
+  const resolvedAudioPath = path.resolve(filePath)
+  const relativeAudioPath = path.relative(taskWorkDirectory, resolvedAudioPath)
+  const audioInternalPath = relativeAudioPath && relativeAudioPath !== '..' && !relativeAudioPath.startsWith(`..${path.sep}`) && !path.isAbsolute(relativeAudioPath)
+    ? relativeAudioPath.split(path.sep).join('/')
+    : 'audio-segment'
+  log('info', 'MiMo transcript input diagnostics', {
+    taskId: task.id, audioInternalPath, durationSeconds: audioDiagnostics.durationSeconds,
+    fileSize: fileStats.size, codec: audioDiagnostics.codec, bitrate: audioDiagnostics.bitrate,
+    sampleRate: audioDiagnostics.sampleRate, channels: audioDiagnostics.channels,
+    model: 'mimo-v2.6-flash', promptVersion: transcriptPromptVersion, segmentCount: count,
+    segment: index, segmentStart: segment?.startSeconds ?? null, segmentEnd: segment?.endSeconds ?? null,
+  })
   const bytes = await fs.promises.readFile(filePath)
   const extension = path.extname(filePath).toLowerCase()
   const mimeType = extension === '.m4a' ? 'audio/mp4' : 'audio/mpeg'
@@ -1479,6 +1494,22 @@ async function callMiMoForSegmentUnlocked(task, prompt, filePath, index, count) 
         }
       }
       if (responseModel.toLowerCase() !== expectedModel) throw transcriptFailure('mimo_unexpected_model', 'MiMo 返回了非预期模型，文字稿未保存。')
+      await outputHandle.close()
+      outputHandle = null
+      const rawOutput = await fs.promises.readFile(outputPath, 'utf8')
+      const outputDiagnostics = analyzeTranscriptOutput(rawOutput)
+      const abnormalFinish = finishReason !== 'stop'
+      log('info', 'MiMo transcript output diagnostics', {
+        taskId: task.id, segment: index, model: responseModel, finishReason: finishReason || 'missing',
+        outputCharacterCount: outputDiagnostics.outputCharacterCount,
+        outputWordCount: outputDiagnostics.outputWordCount,
+        first100Characters: outputDiagnostics.first100Characters,
+        last300Characters: outputDiagnostics.last300Characters,
+        ...(abnormalFinish ? {
+          repetitionScore: outputDiagnostics.repetitionScore,
+          repeatedFragmentSample: outputDiagnostics.repeatedFragmentSample,
+        } : {}),
+      })
       if (finishReason !== 'stop') {
         log('warn', 'MiMo transcript segment was incomplete', {
           taskId: task.id, bvid: task.bvid, segment: index, model: responseModel, finishReason: finishReason || 'missing',
@@ -1506,9 +1537,7 @@ async function callMiMoForSegmentUnlocked(task, prompt, filePath, index, count) 
         }
         throw transcriptFailure('mimo_incomplete_response', 'MiMo 未能完整返回本段文字稿，请重试。')
       }
-      await outputHandle.close()
-      outputHandle = null
-      const text = cleanTranscriptText(await fs.promises.readFile(outputPath, 'utf8'))
+      const text = cleanTranscriptText(rawOutput)
       if (!text) throw transcriptFailure('mimo_empty_response', 'MiMo 返回了空文字稿，请重试。')
       log('info', 'MiMo transcript segment completed', {
         taskId: task.id, bvid: task.bvid, segment: index, model: responseModel,
@@ -1575,6 +1604,31 @@ function probeAudioDuration(ffmpegPath, filePath) {
   if (result.status !== 0) return null
   const duration = Number.parseFloat((result.stdout || '').trim())
   return Number.isFinite(duration) && duration > 0 ? duration : null
+}
+
+function probeAudioDiagnostics(ffmpegPath, filePath, fallbackDuration = null) {
+  const diagnostics = { durationSeconds: Number.isFinite(fallbackDuration) ? fallbackDuration : null, codec: null, bitrate: null, sampleRate: null, channels: null }
+  const executable = findFFprobe(ffmpegPath)
+  if (!executable) return diagnostics
+  const result = spawnSync(executable, [
+    '-v', 'error', '-select_streams', 'a:0', '-show_entries',
+    'stream=codec_name,sample_rate,channels,bit_rate:format=duration,bit_rate', '-of', 'json', filePath,
+  ], { encoding: 'utf8', timeout: 15_000, windowsHide: true })
+  if (result.status !== 0) return diagnostics
+  try {
+    const details = JSON.parse(result.stdout || '{}')
+    const stream = details.streams?.[0] || {}
+    const format = details.format || {}
+    const duration = Number.parseFloat(format.duration)
+    const bitrate = Number.parseInt(stream.bit_rate || format.bit_rate, 10)
+    const sampleRate = Number.parseInt(stream.sample_rate, 10)
+    diagnostics.durationSeconds = Number.isFinite(duration) && duration > 0 ? duration : diagnostics.durationSeconds
+    diagnostics.codec = typeof stream.codec_name === 'string' ? stream.codec_name : null
+    diagnostics.bitrate = Number.isFinite(bitrate) ? bitrate : null
+    diagnostics.sampleRate = Number.isFinite(sampleRate) ? sampleRate : null
+    diagnostics.channels = Number.isFinite(stream.channels) ? stream.channels : null
+  } catch { /* diagnostics must never interrupt transcription */ }
+  return diagnostics
 }
 
 function runNativeAudioDialog(kind) {
@@ -1963,7 +2017,7 @@ async function runTranscriptTask(task) {
       const segmentStartedAt = Date.now()
       try {
         const audioPath = path.join(segmentDirectory, transcriptSegmentFilename(segment))
-        const text = await callMiMoForSegment(task, prompt, audioPath, cursor + 1, segments.length)
+        const text = await callMiMoForSegment(task, prompt, audioPath, cursor + 1, segments.length, segment, ffmpegPath)
         writeTranscriptSegmentText(ownedWorkDirectory, segment.id, text)
         completed.add(segment.id)
         checkpoint.completedSegments = segments.filter((item) => completed.has(item.id)).map((item) => item.id)
@@ -1979,6 +2033,19 @@ async function runTranscriptTask(task) {
       } catch (error) {
         if (!isAdaptiveTranscriptError(error.code)) throw error
         const reasonCode = error.code
+        const failureReason = {
+          mimo_content_filtered: 'content_filter',
+          mimo_repetition_truncation: 'repetition_truncation',
+          mimo_output_truncated: 'length',
+        }[reasonCode]
+        if (failureReason) {
+          log('warn', 'transcript_failure_reason', {
+            taskId: task.id, reason: failureReason,
+            segmentStart: segment.startSeconds ?? null,
+            segmentEnd: segment.endSeconds ?? null,
+            duration: segment.durationSeconds ?? null,
+          })
+        }
         if (reasonCode === 'mimo_repetition_truncation') setTranscriptPhase(task, '检测到重复生成，正在缩小音频片段…')
         if (reasonCode === 'mimo_content_filtered') {
           setTranscriptPhase(task, 'MiMo 安全过滤，正在拆分音频片段…')
