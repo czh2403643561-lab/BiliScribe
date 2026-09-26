@@ -11,6 +11,7 @@ import {
   ensureTranscriptSegmentTimeRanges, formatTranscriptTimeRange, isAdaptiveTranscriptError,
   planAdaptiveTranscriptSplit, replaceAdaptiveTranscriptSegment,
 } from './transcript-adaptive.js'
+import { cleanTranscriptText } from './transcript-text.js'
 
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const configuredExe = process.env.BBDOWN_PATH || path.join(projectRoot, 'tools', 'BBDownNext', 'BBDown.exe')
@@ -1313,10 +1314,6 @@ async function clearTranscriptCheckpoint(directory) {
   if (resolvedSegmentsDirectory.startsWith(`${resolvedDirectory}${path.sep}`)) {
     await fs.promises.rm(audioSegmentsDirectory, { recursive: true, force: true })
   }
-}
-
-function cleanTranscriptText(value) {
-  return String(value || '').replace(/\r\n?/g, '\n').replace(/[\t\u00a0 ]+\n/g, '\n').trim()
 }
 
 function mergeTranscriptSegments(segments) {

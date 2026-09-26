@@ -16,13 +16,14 @@
 - 重复截断诊断日志只记录任务 ID、片段时长/层级、生成字符数、finish reason 和子段时长，不记录正文；纯数字用量字段使用 `completionTokenCount`。
 - MiMo `content_filter` 会自动二分当前失败片段，左右子片段继续走现有串行转写和 checkpoint；按 content-filter 专属递归深度最多拆 4 层，失败时记录音频时间范围并显示明确提示。
 - 音频段 checkpoint 保存源音频时间范围；content-filter 拆分有 `content_filter_split_start`、`content_filter_split_success`、`content_filter_split_failed` 三类诊断事件，不记录转写正文。
+- MiMo 转写 Prompt 明确要求纯文字且禁止时间戳、说话人标签和会议纪要格式；输出清理只剥除行首时间范围与 `SPEAKER_nn:` 前缀，不改正文。
 - UP 主主页合集展开显示合集内全部子视频；搜索时仅显示合集内匹配项，合集勾选继续作用于当前匹配的视频。
 - 展开的合集子视频列表使用视口适配的内部滚动区；合集标题栏保持在滚动区外可见，收起后不保留展开高度。
 - UP 主解析页“投稿视频”统计使用完整 `creatorData.videos.length`；合集/系列统计保持合集数量。
 
 ## 当前验证
 
-- 本次 `npm run build`、`node --check server/api.js`、`node --check server/transcript-adaptive.js`、`node --test server/transcript-adaptive.test.js`（6 项模拟）和 `git diff --check` 通过。
+- 本次 `npm run build`、`node --check server/api.js`、两组转写单元测试（9 项）和 `git diff --check` 通过。
 - production 服务由 `npm run start` 启动，健康接口与 `/api/tasks` 返回 200；浏览器中已验证来源切换和本地音频页面。
 - 原生选择器子进程已启动；当前 UI 控制工具无法操作 Windows 原生窗口，因此未完成实际多选、文件夹扫描和不支持格式的交互验收。
 - 本次未进行真实 MiMo 调用，未运行长课程测试；BiliScribe.vbs 启动命令被本机执行策略拦截，尚未完成 VBS 启动验证。
