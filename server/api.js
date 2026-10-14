@@ -1372,7 +1372,7 @@ async function callMiMoForSegmentUnlocked(task, prompt, filePath, index, count, 
     model: 'mimo-v2.6-flash',
     stream: true,
     stream_options: { include_usage: true },
-    max_completion_tokens: 32000,
+    max_completion_tokens: 131072,
     thinking: { type: 'disabled' },
     messages: [
       { role: 'system', content: `${prompt}\n\n本次任务补充要求：请修正所附音频中的本段课程内容。只输出本段修正后的完整正文，不输出字数统计、标题、摘要、说明或其他内容。` },

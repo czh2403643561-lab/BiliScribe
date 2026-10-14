@@ -18,13 +18,14 @@
 - 音频段 checkpoint 保存源音频时间范围；content-filter 拆分有 `content_filter_split_start`、`content_filter_split_success`、`content_filter_split_failed` 三类诊断事件，不记录转写正文。
 - MiMo 转写 Prompt 明确要求纯文字且禁止时间戳、说话人标签和会议纪要格式；输出清理只剥除行首时间范围与 `SPEAKER_nn:` 前缀，不改正文。
 - MiMo 调试日志补充任务内部音频路径、媒体参数、模型/Prompt 版本/片段范围，以及有界输出摘要；异常结束时附重复度与最多 200 字符的重复片段样例，并统一记录 content_filter、repetition_truncation、length 的失败时间范围。
+- MiMo V2.6 Flash 单次最大输出上限提高到 131072 tokens，其余转写配置保持不变。
 - UP 主主页合集展开显示合集内全部子视频；搜索时仅显示合集内匹配项，合集勾选继续作用于当前匹配的视频。
 - 展开的合集子视频列表使用视口适配的内部滚动区；合集标题栏保持在滚动区外可见，收起后不保留展开高度。
 - UP 主解析页“投稿视频”统计使用完整 `creatorData.videos.length`；合集/系列统计保持合集数量。
 
 ## 当前验证
 
-- 本次 `npm run build`、`node --check server/api.js`、`node --check server/transcript-text.js`、两组转写单元测试（10 项）和 `git diff --check` 通过；未调用 MiMo。
+- 本次 `npm run build`、`node --check server/api.js` 和 `git diff --check` 通过；未调用 MiMo。
 - production 服务由 `npm run start` 启动，健康接口与 `/api/tasks` 返回 200；浏览器中已验证来源切换和本地音频页面。
 - 原生选择器子进程已启动；当前 UI 控制工具无法操作 Windows 原生窗口，因此未完成实际多选、文件夹扫描和不支持格式的交互验收。
 - 本次未进行真实 MiMo 调用，未运行长课程测试；BiliScribe.vbs 启动命令被本机执行策略拦截，尚未完成 VBS 启动验证。
@@ -34,3 +35,4 @@
 - 在可控制 Windows 原生窗口的环境完成文件/文件夹选择及本地转写验收，并验证 VBS 启动。
 - 后续通过真实音频观察自动缩片与 checkpoint 恢复；避免重复运行 77 分钟课程，短音频 `stop` 路径仍保持单次完整请求。
 - 后续可在短音频上观察 content-filter 自动拆分与恢复；不要用长课程重复测试。
+- 已知一段约 91 分钟的本地音频在 `length` 后未生成恰好两个拆分片段，任务失败；此问题留待单独修复。
