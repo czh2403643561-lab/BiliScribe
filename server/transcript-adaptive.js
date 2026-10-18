@@ -1,5 +1,8 @@
 export function isAdaptiveTranscriptError(code) {
-  return code === 'mimo_output_truncated' || code === 'mimo_repetition_truncation' || code === 'mimo_content_filtered'
+  return code === 'mimo_output_truncated'
+    || code === 'mimo_repetition_truncation'
+    || code === 'mimo_content_filtered'
+    || code === 'mimo_param_incorrect'
 }
 
 export function planAdaptiveTranscriptSplit(segment, minimumDurationSeconds, maxSplitDepth) {
@@ -48,4 +51,8 @@ export function formatTranscriptTimeRange(segment) {
     return `${hours}:${minutes}:${remainder}`
   }
   return `${format(startSeconds)}–${format(endSeconds)}`
+}
+
+export function formatParamIncorrectSplitLimitMessage(segment) {
+  return `MiMo 返回 Param Incorrect；片段 ${formatTranscriptTimeRange(segment)} 已达到自动细分限制，原始音频仍保留，请检查片段后重试。`
 }

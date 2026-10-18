@@ -2,6 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import {
   isAdaptiveTranscriptError,
+  formatParamIncorrectSplitLimitMessage,
   planAdaptiveTranscriptSplit,
   replaceAdaptiveTranscriptSegment,
   ensureTranscriptSegmentTimeRanges,
@@ -13,6 +14,23 @@ test('stop does not trigger splitting, while repetition and length do', () => {
   assert.equal(isAdaptiveTranscriptError('mimo_repetition_truncation'), true)
   assert.equal(isAdaptiveTranscriptError('mimo_output_truncated'), true)
   assert.equal(isAdaptiveTranscriptError('mimo_content_filtered'), true)
+  assert.equal(isAdaptiveTranscriptError('mimo_param_incorrect'), true)
+})
+
+test('verified Param Incorrect splits only the failed segment and keeps checkpoint order', () => {
+  const errorCode = 'mimo_param_incorrect'
+  assert.equal(isAdaptiveTranscriptError(errorCode), true)
+  const segments = [{ id: '001', splitDepth: 0 }, { id: '002', splitDepth: 0 }]
+  const checkpoint = { segments, completedSegments: [], segmentCount: 2, currentSegment: '001' }
+  const plan = planAdaptiveTranscriptSplit({ durationSeconds: 4570, splitDepth: 0 }, 480, 10)
+  assert.deepEqual(plan, { canSplit: true, nextDepth: 1, childDurationSeconds: 2285 })
+  const children = [{ id: '001a', splitDepth: 1 }, { id: '001b', splitDepth: 1 }]
+
+  replaceAdaptiveTranscriptSegment(segments, 0, children, checkpoint, new Set())
+  assert.deepEqual(segments.map(({ id }) => id), ['001a', '001b', '002'])
+  assert.deepEqual(checkpoint.completedSegments, [])
+  assert.equal(checkpoint.currentSegment, '001a')
+  assert.equal(checkpoint.segmentCount, 3)
 })
 
 test('a failed 77 minute segment is bisected and reports child duration', () => {
@@ -36,6 +54,13 @@ test('only the failed segment is replaced and completed checkpoint segments rema
 test('a child below the 8 minute minimum cannot be split again', () => {
   const plan = planAdaptiveTranscriptSplit({ durationSeconds: 575, splitDepth: 3 }, 480, 10)
   assert.deepEqual(plan, { canSplit: false, reason: 'minimum_duration' })
+})
+
+test('Param Incorrect at the split limit reports the cause and preserves the segment range', () => {
+  const message = formatParamIncorrectSplitLimitMessage({ startSeconds: 0, endSeconds: 900, durationSeconds: 900 })
+  assert.match(message, /Param Incorrect/)
+  assert.match(message, /00:00:00–00:15:00/)
+  assert.match(message, /原始音频仍保留/)
 })
 
 test('content-filter segments split through depth 4 and then stop', () => {

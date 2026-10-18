@@ -84,3 +84,9 @@ export async function readMiMoHttpError(response) {
     if (!timedOut) reader.cancel().catch(() => {})
   }
 }
+
+export function isMimoParamIncorrectHttpError(status, diagnostics) {
+  return status === 400
+    && typeof diagnostics?.serverErrorMessage === 'string'
+    && diagnostics.serverErrorMessage.trim().toLowerCase() === 'param incorrect'
+}

@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { readMiMoHttpError } from './mimo-http-error.js'
+import { isMimoParamIncorrectHttpError, readMiMoHttpError } from './mimo-http-error.js'
 
 test('HTTP 400 diagnostics are parsed and redact sensitive response content', async () => {
   const response = new Response(JSON.stringify({
@@ -18,6 +18,15 @@ test('HTTP 400 diagnostics are parsed and redact sensitive response content', as
   assert.match(capturedLog, /Audio rejected/)
   assert.match(capturedLog, /req-400-123/)
   assert.doesNotMatch(capturedLog, /SECRET PROMPT|super-secret-token|SECRET_AUDIO_BASE64/)
+})
+
+test('only HTTP 400 with the verified Param Incorrect message is eligible for adaptive splitting', () => {
+  assert.equal(isMimoParamIncorrectHttpError(400, { serverErrorMessage: 'Param Incorrect' }), true)
+  assert.equal(isMimoParamIncorrectHttpError(400, { serverErrorMessage: ' param incorrect ' }), true)
+  assert.equal(isMimoParamIncorrectHttpError(400, { serverErrorMessage: 'Invalid model' }), false)
+  assert.equal(isMimoParamIncorrectHttpError(400, { serverErrorMessage: 'Param Incorrect: invalid prompt' }), false)
+  assert.equal(isMimoParamIncorrectHttpError(401, { serverErrorMessage: 'Param Incorrect' }), false)
+  assert.equal(isMimoParamIncorrectHttpError(200, { serverErrorMessage: 'Param Incorrect' }), false)
 })
 
 test('error response reading stops at the byte limit', async () => {
