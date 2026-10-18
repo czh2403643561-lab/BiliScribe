@@ -20,6 +20,7 @@
 - 音频段 checkpoint 保存源音频时间范围；content-filter 拆分有 `content_filter_split_start`、`content_filter_split_success`、`content_filter_split_failed` 三类诊断事件，不记录转写正文。
 - MiMo 转写 Prompt 明确要求纯文字且禁止时间戳、说话人标签和会议纪要格式；输出清理只剥除行首时间范围与 `SPEAKER_nn:` 前缀，不改正文。
 - MiMo 调试日志补充任务内部音频路径、媒体参数、模型/Prompt 版本/片段范围，以及有界输出摘要；异常结束时附重复度与最多 200 字符的重复片段样例，并统一记录 content_filter、repetition_truncation、length 的失败时间范围。
+- MiMo 非 2xx 响应会在最多读取 8 KiB、最多等待 2 秒后记录 HTTP 状态、服务端错误代码/类型、脱敏消息和可用请求 ID；界面继续显示安全错误提示，不记录请求内容或凭据。
 - MiMo V2.6 Flash 单次最大输出上限提高到 131072 tokens，其余转写配置保持不变。
 - UP 主主页合集展开显示合集内全部子视频；搜索时仅显示合集内匹配项，合集勾选继续作用于当前匹配的视频。
 - 展开的合集子视频列表使用视口适配的内部滚动区；合集标题栏保持在滚动区外可见，收起后不保留展开高度。
@@ -27,7 +28,7 @@
 
 ## 当前验证
 
-- 本次 `node --check server/api.js`、`npm run build`、`git diff --check` 和 3 个本地媒体单元测试通过；未调用 MiMo。
+- 本次 HTTP 400 模拟及有界读取/超时测试和现有相关单元测试共 16 项通过；`node --check server/api.js`、`npm run build`、`git diff --check` 通过，未调用 MiMo。
 - production 后端已重启，健康接口返回 200；文件和文件夹弹窗均实际创建且处于置顶状态，关闭后 API 返回取消；并发请求返回 409，页面请求中断后未遗留选择器子进程。
 - 尚未在原生弹窗中实际选择文件或文件夹，因此多选、当前层级扫描及 MP4 导入交互仍待人工验收。
 - 本次未进行真实 MiMo 调用，未运行长课程测试；BiliScribe.vbs 启动命令被本机执行策略拦截，尚未完成 VBS 启动验证。

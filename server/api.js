@@ -12,6 +12,7 @@ import {
   planAdaptiveTranscriptSplit, replaceAdaptiveTranscriptSegment,
 } from './transcript-adaptive.js'
 import { analyzeTranscriptOutput, cleanTranscriptText } from './transcript-text.js'
+import { readMiMoHttpError } from './mimo-http-error.js'
 import {
   buildLocalAudioPreparationArgs, inspectFirstAudioStream, isLocalMp4,
   isSupportedLocalMedia, isValidLocalMediaBatchSize, localMediaDialogFilter, localMediaExtensions, localMp4AudioError,
@@ -1417,7 +1418,10 @@ async function callMiMoForSegmentUnlocked(task, prompt, filePath, index, count, 
       clearTimeout(connectTimer)
       log('info', 'MiMo transcript response received', { taskId: task.id, bvid: task.bvid, segment: index, status: response.status })
       if (!response.ok) {
-        await response.body?.cancel().catch(() => {})
+        const diagnostics = await readMiMoHttpError(response)
+        log('error', 'MiMo transcript HTTP error', {
+          taskId: task.id, segment: index, status: response.status, ...diagnostics,
+        })
         const error = transcriptErrorForStatus(response.status)
         const retryable = response.status === 429 || response.status >= 500
         if (retryable && attempt < 2) {
