@@ -814,7 +814,7 @@ onUnmounted(() => { clearInterval(taskPollTimer); clearInterval(qrPollTimer); cl
 
           <div class="source-switch" role="tablist" aria-label="任务来源">
             <button role="tab" :aria-selected="newTaskSource === 'bilibili'" :class="{ active: newTaskSource === 'bilibili' }" @click="newTaskSource = 'bilibili'">B站内容</button>
-            <button role="tab" :aria-selected="newTaskSource === 'local'" :class="{ active: newTaskSource === 'local' }" @click="newTaskSource = 'local'">本地音频</button>
+            <button role="tab" :aria-selected="newTaskSource === 'local'" :class="{ active: newTaskSource === 'local' }" @click="newTaskSource = 'local'">本地音视频</button>
           </div>
 
           <template v-if="newTaskSource === 'bilibili'">
@@ -864,13 +864,13 @@ onUnmounted(() => { clearInterval(taskPollTimer); clearInterval(qrPollTimer); cl
           </template>
           <div v-else class="local-audio-panel panel">
             <div class="local-audio-heading">
-              <div><div class="eyebrow">LOCAL AUDIO</div><h2>本地音频转写</h2><p>导入本机音频，使用当前 MiMo 配置生成文字稿。</p></div>
+              <div><div class="eyebrow">LOCAL MEDIA</div><h2>本地音视频转写</h2><p>导入本机音频或视频，使用当前 MiMo 配置生成文字稿。</p></div>
               <div class="local-audio-actions">
                 <button class="outline-button" :disabled="!!localAudioPickerBusy" @click="selectLocalAudio('files')"><LoaderCircle v-if="localAudioPickerBusy === 'files'" class="spin" :size="15" /><FileAudio v-else :size="15" />选择文件</button>
                 <button class="primary-button" :disabled="!!localAudioPickerBusy" @click="selectLocalAudio('folder')"><LoaderCircle v-if="localAudioPickerBusy === 'folder'" class="spin" :size="15" /><FolderOpen v-else :size="15" />选择文件夹</button>
               </div>
             </div>
-            <div class="local-audio-formats">支持 MP3、M4A、WAV、FLAC、OGG。选择文件夹时只读取当前层级。</div>
+            <div class="local-audio-formats">支持 MP3、M4A、WAV、FLAC、OGG、MP4。选择文件夹时只读取当前层级。</div>
             <div v-if="localAudioNotice" class="local-audio-notice"><Check :size="14" />{{ localAudioNotice }}</div>
             <div v-if="localAudioFiles.length" class="local-audio-list-wrap">
               <div class="local-audio-toolbar">
@@ -889,7 +889,7 @@ onUnmounted(() => { clearInterval(taskPollTimer); clearInterval(qrPollTimer); cl
                 </div>
               </div>
             </div>
-            <div v-else class="local-audio-empty"><FileAudio :size="24" /><strong>还没有导入音频</strong><span>可以多选音频文件，或选择一个文件夹导入其中的音频。</span></div>
+            <div v-else class="local-audio-empty"><FileAudio :size="24" /><strong>还没有导入音视频</strong><span>可以多选音频或 MP4 文件，或选择一个文件夹导入其中的文件。</span></div>
             <div class="local-audio-footer"><span>已选择 <strong>{{ selectedLocalAudioCount }}</strong> 个</span><button class="primary-button" :disabled="!selectedLocalAudioCount || !!localAudioPickerBusy" @click="createLocalAudioTasks"><FileText :size="15" />创建 {{ selectedLocalAudioCount }} 个转写任务</button></div>
           </div>
         </section>

@@ -12,6 +12,10 @@ import {
   planAdaptiveTranscriptSplit, replaceAdaptiveTranscriptSegment,
 } from './transcript-adaptive.js'
 import { analyzeTranscriptOutput, cleanTranscriptText } from './transcript-text.js'
+import {
+  buildLocalAudioPreparationArgs, inspectFirstAudioStream, isLocalMp4,
+  isSupportedLocalMedia, isValidLocalMediaBatchSize, localMediaDialogFilter, localMediaExtensions, localMp4AudioError,
+} from './local-media.js'
 
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const configuredExe = process.env.BBDOWN_PATH || path.join(projectRoot, 'tools', 'BBDownNext', 'BBDown.exe')
@@ -46,7 +50,6 @@ const transcriptConnectTimeoutMs = 30_000
 const transcriptStreamIdleTimeoutMs = 120_000
 const defaultDownloadDirectory = path.join(os.homedir(), 'Videos', 'BiliScribe')
 const mediaExtensions = new Set(['.mp4', '.mkv', '.flv', '.m4a', '.mka', '.mp3', '.aac', '.wav', '.flac', '.m4s'])
-const localAudioExtensions = new Set(['.mp3', '.m4a', '.wav', '.flac', '.ogg'])
 const localAudioSelections = new Map()
 const localAudioSelectionTtlMs = 60 * 60 * 1000
 const bilibiliImageHosts = ['hdslb.com', 'bilivideo.com']
@@ -1632,10 +1635,10 @@ function probeAudioDiagnostics(ffmpegPath, filePath, fallbackDuration = null) {
 }
 
 function runNativeAudioDialog(kind) {
-  if (process.platform !== 'win32') throw Object.assign(new Error('本地音频选择仅支持 Windows。'), { statusCode: 501, code: 'unsupported_platform' })
+  if (process.platform !== 'win32') throw Object.assign(new Error('本地音视频选择仅支持 Windows。'), { statusCode: 501, code: 'unsupported_platform' })
   const script = kind === 'folder'
-    ? `$ErrorActionPreference = 'Stop'; [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); Add-Type -AssemblyName System.Windows.Forms; $dialog = New-Object System.Windows.Forms.FolderBrowserDialog; $dialog.Description = '选择包含音频文件的文件夹'; $dialog.ShowNewFolderButton = $false; if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { ConvertTo-Json -Compress -InputObject @{ paths = @($dialog.SelectedPath) } } else { ConvertTo-Json -Compress -InputObject @{ paths = @() } }`
-    : `$ErrorActionPreference = 'Stop'; [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); Add-Type -AssemblyName System.Windows.Forms; $dialog = New-Object System.Windows.Forms.OpenFileDialog; $dialog.Title = '选择本地音频'; $dialog.Multiselect = $true; $dialog.CheckFileExists = $true; $dialog.Filter = '支持的音频文件|*.mp3;*.m4a;*.wav;*.flac;*.ogg'; if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { ConvertTo-Json -Compress -InputObject @{ paths = @($dialog.FileNames) } } else { ConvertTo-Json -Compress -InputObject @{ paths = @() } }`
+    ? `$ErrorActionPreference = 'Stop'; [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); Add-Type -AssemblyName System.Windows.Forms; $dialog = New-Object System.Windows.Forms.FolderBrowserDialog; $dialog.Description = '选择包含音频或视频文件的文件夹'; $dialog.ShowNewFolderButton = $false; if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { ConvertTo-Json -Compress -InputObject @{ paths = @($dialog.SelectedPath) } } else { ConvertTo-Json -Compress -InputObject @{ paths = @() } }`
+    : `$ErrorActionPreference = 'Stop'; [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); Add-Type -AssemblyName System.Windows.Forms; $dialog = New-Object System.Windows.Forms.OpenFileDialog; $dialog.Title = '选择本地音视频'; $dialog.Multiselect = $true; $dialog.CheckFileExists = $true; $dialog.Filter = '${localMediaDialogFilter}'; if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { ConvertTo-Json -Compress -InputObject @{ paths = @($dialog.FileNames) } } else { ConvertTo-Json -Compress -InputObject @{ paths = @() } }`
   const encodedScript = Buffer.from(script, 'utf16le').toString('base64')
   return new Promise((resolve, reject) => {
     const child = spawn('powershell.exe', ['-NoLogo', '-NoProfile', '-STA', '-NonInteractive', '-EncodedCommand', encodedScript], {
@@ -1668,7 +1671,7 @@ function pruneLocalAudioSelections() {
 
 function makeLocalAudioSelection(filePath, groupName = '', ffmpegPath = null) {
   const extension = path.extname(filePath).toLowerCase()
-  if (!localAudioExtensions.has(extension)) return null
+  if (!isSupportedLocalMedia(filePath)) return null
   const stats = fs.statSync(filePath)
   if (!stats.isFile()) return null
   const id = randomUUID()
@@ -1701,7 +1704,7 @@ async function selectLocalAudio(response, kind) {
     for (const entry of entries) {
       if (!entry.isFile()) continue
       const filePath = path.join(folderPath, entry.name)
-      if (!localAudioExtensions.has(path.extname(entry.name).toLowerCase())) { ignoredCount += 1; continue }
+      if (!localMediaExtensions.has(path.extname(entry.name).toLowerCase())) { ignoredCount += 1; continue }
       try {
         const item = makeLocalAudioSelection(filePath, groupName, ffmpegPath)
         if (item) files.push(item)
@@ -1843,10 +1846,10 @@ async function runTranscriptTask(task) {
       const sourcePath = path.resolve(String(task.source.path || ''))
       let sourceStats
       try { sourceStats = await fs.promises.stat(sourcePath) } catch {
-        throw transcriptFailure('local_audio_missing', '源音频文件不存在或已被移动。')
+        throw transcriptFailure('local_media_missing', '源音视频文件不存在或已被移动。')
       }
-      if (!sourceStats.isFile() || !localAudioExtensions.has(path.extname(sourcePath).toLowerCase())) {
-        throw transcriptFailure('local_audio_missing', '源音频文件不存在或已被移动。')
+      if (!sourceStats.isFile() || !isSupportedLocalMedia(sourcePath)) {
+        throw transcriptFailure('local_media_missing', '源音视频文件不存在或已被移动。')
       }
       sourceAudio = sourcePath
       task.source.path = sourcePath
@@ -1859,6 +1862,10 @@ async function runTranscriptTask(task) {
     if (!mimoApiKey) throw transcriptFailure('mimo_key_missing', '请先在设置中配置 MiMo API Key。')
     const ffmpegPath = findFFmpeg()
     if (!ffmpegPath) throw transcriptFailure('ffmpeg_unavailable', '未找到 FFmpeg，请安装后重试转写。')
+    if (task.source?.type === 'local' && isLocalMp4(sourceAudio)) {
+      const audioProblem = localMp4AudioError(inspectFirstAudioStream(findFFprobe(ffmpegPath), sourceAudio))
+      if (audioProblem) throw transcriptFailure(audioProblem.code, audioProblem.message)
+    }
     await ensureWritableDirectory(transcriptDirectory)
     await fs.promises.mkdir(ownedWorkDirectory, { recursive: true })
     await fs.promises.mkdir(sourceDownloadDirectory, { recursive: true })
@@ -1913,10 +1920,14 @@ async function runTranscriptTask(task) {
       await clearTranscriptCheckpoint(ownedWorkDirectory)
       await fs.promises.mkdir(segmentDirectory, { recursive: true })
       const sourceDurationSeconds = probeAudioDuration(ffmpegPath, sourceAudio)
-      await runTranscriptProcess(task, ffmpegPath, [
-        '-hide_banner', '-loglevel', 'error', '-y', '-i', sourceAudio, '-map', '0:a:0', '-vn', '-ac', '1', '-ar', '16000', '-c:a', 'aac', '-b:a', transcriptBitrate,
-        '-movflags', '+faststart', path.join(segmentDirectory, 'prepared-audio.m4a'),
-      ], '音频处理中')
+      try {
+        await runTranscriptProcess(task, ffmpegPath, buildLocalAudioPreparationArgs(sourceAudio, path.join(segmentDirectory, 'prepared-audio.m4a'), transcriptBitrate), '音频处理中')
+      } catch (error) {
+        if (task.source?.type === 'local' && isLocalMp4(sourceAudio) && error.code !== 'transcript_cancelled' && !task.cancelRequested) {
+          throw transcriptFailure('local_mp4_audio_unreadable', '无法解码此 MP4 的音轨，文件可能已损坏；请检查文件后重试。')
+        }
+        throw error
+      }
       const preparedAudioPath = path.join(segmentDirectory, 'prepared-audio.m4a')
       const preparedStats = await fs.promises.stat(preparedAudioPath).catch(() => null)
       if (!preparedStats?.isFile()) throw transcriptFailure('transcript_audio_conversion_failed', 'FFmpeg 没有生成可转写的音频。')
@@ -2261,17 +2272,17 @@ async function createBatchDownloadTasks(request, response) {
 async function createLocalAudioTasks(request, response) {
   pruneLocalAudioSelections()
   const body = await readJsonBody(request, 2 * 1024 * 1024)
-  if (!Array.isArray(body.items) || !body.items.length || body.items.length > 3000) {
-    sendError(response, 400, 'invalid_local_audio_batch', '请选择 1 到 3000 个音频文件后再创建任务。')
+  if (!Array.isArray(body.items) || !isValidLocalMediaBatchSize(body.items.length)) {
+    sendError(response, 400, 'invalid_local_audio_batch', '请选择 1 到 3000 个音视频文件后再创建任务。')
     return
   }
   const normalized = body.items.map((input) => {
     if (!input || typeof input.selectionId !== 'string' || typeof input.title !== 'string') {
-      throw Object.assign(new Error('本地音频选择信息无效，请重新导入。'), { statusCode: 400, code: 'invalid_local_audio_selection' })
+      throw Object.assign(new Error('本地音视频选择信息无效，请重新导入。'), { statusCode: 400, code: 'invalid_local_audio_selection' })
     }
     const selected = localAudioSelections.get(input.selectionId)
     if (!selected || Date.now() - selected.createdAt > localAudioSelectionTtlMs) {
-      throw Object.assign(new Error('音频选择已过期，请重新导入文件。'), { statusCode: 400, code: 'local_audio_selection_expired' })
+      throw Object.assign(new Error('音视频选择已过期，请重新导入文件。'), { statusCode: 400, code: 'local_audio_selection_expired' })
     }
     return { selected, title: String(input.title.trim() || path.parse(selected.originalName).name).slice(0, 300) }
   })

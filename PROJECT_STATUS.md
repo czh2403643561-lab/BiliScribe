@@ -12,6 +12,7 @@
 - 每次转写运行时将视频标题、UP 主和可用合集/系列名称附加到现有 Prompt 前；单视频与 UP 主批量任务均使用各自元数据，普通投稿不生成空合集信息，动态内容不写入日志。
 - 新增本地音频导入入口与 Windows 原生多选/文件夹选择；本地 source 以授权引用创建现有串行 transcript task，复用 FFmpeg、MiMo、Prompt、checkpoint、任务中心和文字稿库。
 - 本地音频支持 mp3、m4a、wav、flac、ogg；文件夹只扫描当前层级，标题可编辑，TXT 保存到“本地导入/课程名”或“本地导入/未分组”。本机路径只保存在后台状态中，任务 API 返回时会隐藏路径。
+- 本地导入扩展为“本地音视频”，支持 MP4；每个任务通过 FFmpeg 只提取第一条音轨并按 AAC/16 kHz/单声道/32 kbps 生成任务目录内的 M4A。MP4 无音轨、不可读或解码失败时任务会明确失败并继续队列；成功清理该任务工作目录，原始媒体保留。
 - MiMo 遇到 `repetition_truncation` 或 `length` 时只自适应拆分当前失败片段；整段请求仍优先，成功片段立即写入 checkpoint 并在重试时复用。动态拆分最小子段为 8 分钟，重复截断达到下限时显示明确的音频质量错误。
 - 重复截断诊断日志只记录任务 ID、片段时长/层级、生成字符数、finish reason 和子段时长，不记录正文；纯数字用量字段使用 `completionTokenCount`。
 - MiMo `content_filter` 会自动二分当前失败片段，左右子片段继续走现有串行转写和 checkpoint；按 content-filter 专属递归深度最多拆 4 层，失败时记录音频时间范围并显示明确提示。
@@ -25,7 +26,7 @@
 
 ## 当前验证
 
-- 本次 `npm run build`、`node --check server/api.js` 和 `git diff --check` 通过；未调用 MiMo。
+- 本次 `node --check server/api.js`、`node --check server/local-media.js`、`npm run build`、`git diff --check` 及 13 个相关单元测试通过；FFmpeg 夹具验证了 MP4 提取、无音轨和损坏文件识别，以及 75 个任务的批量上限检查；未调用 MiMo。
 - production 服务由 `npm run start` 启动，健康接口与 `/api/tasks` 返回 200；浏览器中已验证来源切换和本地音频页面。
 - 原生选择器子进程已启动；当前 UI 控制工具无法操作 Windows 原生窗口，因此未完成实际多选、文件夹扫描和不支持格式的交互验收。
 - 本次未进行真实 MiMo 调用，未运行长课程测试；BiliScribe.vbs 启动命令被本机执行策略拦截，尚未完成 VBS 启动验证。
@@ -36,3 +37,4 @@
 - 后续通过真实音频观察自动缩片与 checkpoint 恢复；避免重复运行 77 分钟课程，短音频 `stop` 路径仍保持单次完整请求。
 - 后续可在短音频上观察 content-filter 自动拆分与恢复；不要用长课程重复测试。
 - 已知一段约 91 分钟的本地音频在 `length` 后未生成恰好两个拆分片段，任务失败；此问题留待单独修复。
+- MP4 尚未在 BiliScribe 界面中进行 Windows 原生文件/文件夹导入与完整队列验收；75 个任务的真实批量创建/串行执行和真实 MiMo 转写也未进行。
