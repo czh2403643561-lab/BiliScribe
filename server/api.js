@@ -52,6 +52,7 @@ const defaultDownloadDirectory = path.join(os.homedir(), 'Videos', 'BiliScribe')
 const mediaExtensions = new Set(['.mp4', '.mkv', '.flv', '.m4a', '.mka', '.mp3', '.aac', '.wav', '.flac', '.m4s'])
 const localAudioSelections = new Map()
 const localAudioSelectionTtlMs = 60 * 60 * 1000
+let activeLocalAudioPicker = null
 const bilibiliImageHosts = ['hdslb.com', 'bilivideo.com']
 const wbiMixinIndices = [46, 47, 18, 2, 53, 8, 23, 32, 15, 50, 10, 31, 58, 3, 45, 35, 27, 43, 5, 49, 33, 9, 42, 19, 29, 28, 14, 39, 12, 38, 41, 13, 37, 48, 7, 16, 24, 55, 40, 61, 26, 17, 0, 1, 60, 51, 30, 4, 22, 25, 54, 21, 56, 59, 6, 63, 57, 62, 11, 36, 20, 34, 44, 52]
 
@@ -1634,30 +1635,72 @@ function probeAudioDiagnostics(ffmpegPath, filePath, fallbackDuration = null) {
   return diagnostics
 }
 
-function runNativeAudioDialog(kind) {
+function runNativeAudioDialog(kind, signal) {
   if (process.platform !== 'win32') throw Object.assign(new Error('本地音视频选择仅支持 Windows。'), { statusCode: 501, code: 'unsupported_platform' })
-  const script = kind === 'folder'
-    ? `$ErrorActionPreference = 'Stop'; [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); Add-Type -AssemblyName System.Windows.Forms; $dialog = New-Object System.Windows.Forms.FolderBrowserDialog; $dialog.Description = '选择包含音频或视频文件的文件夹'; $dialog.ShowNewFolderButton = $false; if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { ConvertTo-Json -Compress -InputObject @{ paths = @($dialog.SelectedPath) } } else { ConvertTo-Json -Compress -InputObject @{ paths = @() } }`
-    : `$ErrorActionPreference = 'Stop'; [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); Add-Type -AssemblyName System.Windows.Forms; $dialog = New-Object System.Windows.Forms.OpenFileDialog; $dialog.Title = '选择本地音视频'; $dialog.Multiselect = $true; $dialog.CheckFileExists = $true; $dialog.Filter = '${localMediaDialogFilter}'; if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { ConvertTo-Json -Compress -InputObject @{ paths = @($dialog.FileNames) } } else { ConvertTo-Json -Compress -InputObject @{ paths = @() } }`
+  if (activeLocalAudioPicker) throw Object.assign(new Error('已有文件选择窗口，请先完成或关闭。'), { statusCode: 409, code: 'audio_picker_busy' })
+  const script = [
+    "$ErrorActionPreference = 'Stop'",
+    '[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)',
+    'Add-Type -AssemblyName System.Windows.Forms',
+    '$owner = New-Object System.Windows.Forms.Form',
+    '$owner.TopMost = $true',
+    '$owner.ShowInTaskbar = $false',
+    '$owner.StartPosition = [System.Windows.Forms.FormStartPosition]::CenterScreen',
+    '$owner.Size = New-Object System.Drawing.Size(1, 1)',
+    '$owner.Opacity = 0',
+    '$owner.Show()',
+    '$owner.Activate()',
+    kind === 'folder'
+      ? "$dialog = New-Object System.Windows.Forms.FolderBrowserDialog; $dialog.Description = '选择包含音频或视频文件的文件夹'; $dialog.ShowNewFolderButton = $false"
+      : `$dialog = New-Object System.Windows.Forms.OpenFileDialog; $dialog.Title = '选择本地音视频'; $dialog.Multiselect = $true; $dialog.CheckFileExists = $true; $dialog.Filter = '${localMediaDialogFilter}'`,
+    kind === 'folder'
+      ? 'try { if ($dialog.ShowDialog($owner) -eq [System.Windows.Forms.DialogResult]::OK) { ConvertTo-Json -Compress -InputObject @{ paths = @($dialog.SelectedPath) } } else { ConvertTo-Json -Compress -InputObject @{ paths = @() } } } finally { $dialog.Dispose(); $owner.Dispose() }'
+      : 'try { if ($dialog.ShowDialog($owner) -eq [System.Windows.Forms.DialogResult]::OK) { ConvertTo-Json -Compress -InputObject @{ paths = @($dialog.FileNames) } } else { ConvertTo-Json -Compress -InputObject @{ paths = @() } } } finally { $dialog.Dispose(); $owner.Dispose() }',
+  ].join('; ')
   const encodedScript = Buffer.from(script, 'utf16le').toString('base64')
   return new Promise((resolve, reject) => {
-    const child = spawn('powershell.exe', ['-NoLogo', '-NoProfile', '-STA', '-NonInteractive', '-EncodedCommand', encodedScript], {
-      windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'],
-    })
+    let child
+    try {
+      child = spawn('powershell.exe', ['-NoLogo', '-NoProfile', '-STA', '-NonInteractive', '-EncodedCommand', encodedScript], {
+        windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'],
+      })
+    } catch {
+      reject(Object.assign(new Error('无法打开 Windows 文件选择器。'), { code: 'audio_picker_unavailable' }))
+      return
+    }
+    activeLocalAudioPicker = child
     let output = ''
     let outputExceeded = false
+    let aborted = false
+    let timedOut = false
+    let settled = false
+    const onAbort = () => { aborted = true; child.kill() }
+    const timeout = setTimeout(() => { timedOut = true; child.kill() }, 10 * 60 * 1000)
+    signal?.addEventListener('abort', onAbort, { once: true })
+    if (signal?.aborted) onAbort()
+    const finish = (error, paths = []) => {
+      if (settled) return
+      settled = true
+      clearTimeout(timeout)
+      signal?.removeEventListener('abort', onAbort)
+      if (activeLocalAudioPicker === child) activeLocalAudioPicker = null
+      if (error) reject(error)
+      else resolve(paths)
+    }
     child.stdout.on('data', (chunk) => {
       output += String(chunk)
       if (output.length > 1024 * 1024) outputExceeded = true
     })
-    child.once('error', () => reject(Object.assign(new Error('无法打开 Windows 文件选择器。'), { code: 'audio_picker_unavailable' })))
+    child.once('error', () => finish(aborted ? null : Object.assign(new Error('无法打开 Windows 文件选择器。'), { code: 'audio_picker_unavailable' })))
     child.once('close', (code) => {
-      if (code !== 0 || outputExceeded) return reject(Object.assign(new Error('文件选择器未能完成。'), { code: 'audio_picker_failed' }))
+      if (aborted) return finish(null, [])
+      if (timedOut) return finish(Object.assign(new Error('文件选择窗口等待超时，请重新选择。'), { code: 'audio_picker_timeout' }))
+      if (code !== 0 || outputExceeded) return finish(Object.assign(new Error('文件选择器未能完成。'), { code: 'audio_picker_failed' }))
       try {
         const selected = JSON.parse(output.replace(/^\uFEFF/, '').trim() || '{}')
-        resolve(Array.isArray(selected?.paths) ? selected.paths.filter((item) => typeof item === 'string') : [])
+        finish(null, Array.isArray(selected?.paths) ? selected.paths.filter((item) => typeof item === 'string') : [])
       } catch {
-        reject(Object.assign(new Error('文件选择器返回的信息无效。'), { code: 'audio_picker_invalid_response' }))
+        finish(Object.assign(new Error('文件选择器返回的信息无效。'), { code: 'audio_picker_invalid_response' }))
       }
     })
   })
@@ -1686,7 +1729,13 @@ function makeLocalAudioSelection(filePath, groupName = '', ffmpegPath = null) {
 
 async function selectLocalAudio(response, kind) {
   pruneLocalAudioSelections()
-  const selectedPaths = await runNativeAudioDialog(kind)
+  const controller = new AbortController()
+  const onResponseClose = () => { if (!response.writableEnded) controller.abort() }
+  response.once('close', onResponseClose)
+  let selectedPaths
+  try { selectedPaths = await runNativeAudioDialog(kind, controller.signal) }
+  finally { response.off('close', onResponseClose) }
+  if (response.destroyed) return
   if (!selectedPaths.length) {
     sendJson(response, 200, { files: [], ignoredCount: 0, cancelled: true })
     return
