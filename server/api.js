@@ -12,6 +12,9 @@ import {
   formatParamIncorrectSplitLimitMessage, planAdaptiveTranscriptSplit, replaceAdaptiveTranscriptSegment,
 } from './transcript-adaptive.js'
 import { analyzeTranscriptOutput, cleanTranscriptText } from './transcript-text.js'
+import {
+  buildTranscriptSplitArgs, planTranscriptSplitRanges, promoteTranscriptSplitFiles, validateTranscriptSplitPart,
+} from './transcript-split.js'
 import { isMimoParamIncorrectHttpError, readMiMoHttpError } from './mimo-http-error.js'
 import {
   buildLocalAudioPreparationArgs, inspectFirstAudioStream, isLocalMp4,
@@ -1172,12 +1175,12 @@ function setTranscriptPhase(task, phase) {
   log('info', 'Transcript task phase changed', { taskId: task.id, bvid: task.bvid, phase })
 }
 
-async function runTranscriptProcess(task, command, args, phase) {
+async function runTranscriptProcess(task, command, args, phase, options = {}) {
   if (task.cancelRequested) throw transcriptFailure('transcript_cancelled', '任务已取消。')
   setTranscriptPhase(task, phase)
   let child
   try {
-    child = spawn(command, args, { cwd: projectRoot, windowsHide: true, stdio: 'ignore' })
+    child = spawn(command, args, { cwd: projectRoot, windowsHide: true, stdio: options.captureStderr ? ['ignore', 'ignore', 'pipe'] : 'ignore' })
   } catch (error) {
     throw transcriptFailure(error.code || 'transcript_process_start_failed', '音频处理程序无法启动。')
   }
@@ -1185,6 +1188,10 @@ async function runTranscriptProcess(task, command, args, phase) {
   childProcesses.add(child)
   const result = await new Promise((resolve, reject) => {
     let settled = false
+    let stderr = ''
+    if (options.captureStderr) child.stderr?.on('data', (chunk) => {
+      if (stderr.length < 4096) stderr += String(chunk).slice(0, 4096 - stderr.length)
+    })
     child.once('error', (error) => {
       if (settled) return
       settled = true
@@ -1193,14 +1200,16 @@ async function runTranscriptProcess(task, command, args, phase) {
     child.once('close', (exitCode, signal) => {
       if (settled) return
       settled = true
-      resolve({ exitCode, signal })
+      resolve({ exitCode, signal, stderr })
     })
   }).finally(() => {
     childProcesses.delete(child)
     if (activeDownloadChild === child) activeDownloadChild = null
   })
   if (task.cancelRequested) throw transcriptFailure('transcript_cancelled', '任务已取消。')
-  if (result.exitCode !== 0) throw transcriptFailure('transcript_process_failed', '音频处理失败，请检查 FFmpeg 或 B 站网络后重试。')
+  if (result.exitCode !== 0) throw Object.assign(transcriptFailure('transcript_process_failed', '音频处理失败，请检查 FFmpeg 或 B 站网络后重试。'), {
+    diagnostic: options.captureStderr ? result.stderr.replace(/\x1b\[[0-9;]*m/g, '').replace(/[\r\n\t]+/g, ' ').slice(0, 240) : undefined,
+  })
   return result
 }
 
@@ -1815,66 +1824,99 @@ async function splitTranscriptSegment(task, ffmpegPath, workDirectory, segment, 
     }
     throw transcriptFailure('mimo_output_truncated_terminal', 'MiMo 输出长度不足，音频已缩小到可安全转写的最小片段，请检查源音频。')
   }
-  const splitPattern = path.join(segmentDirectory, `segment-${segment.id}-split-%01d.m4a`)
-  try {
-    await runTranscriptProcess(task, ffmpegPath, [
-      '-hide_banner', '-loglevel', 'error', '-y', '-i', inputPath, '-map', '0:a:0', '-vn', '-ac', '1', '-ar', '16000', '-c:a', 'aac', '-b:a', transcriptBitrate,
-      '-f', 'segment', '-segment_format', 'mp4', '-segment_time', splitPlan.childDurationSeconds.toFixed(3), '-segment_start_number', '1', '-reset_timestamps', '1', splitPattern,
-    ], reasonCode === 'mimo_repetition_truncation'
-      ? '检测到重复生成，正在缩小音频片段…'
-      : reasonCode === 'mimo_content_filtered' ? 'MiMo 安全过滤，正在拆分音频片段…'
-        : reasonCode === 'mimo_param_incorrect' ? 'MiMo 拒绝当前音频片段，正在安全拆分…' : '音频处理中')
-  } catch (error) {
-    if (reasonCode !== 'mimo_param_incorrect') throw error
-    const splitPrefix = `segment-${segment.id}-split-`
-    const stagedOnFailure = (await fs.promises.readdir(segmentDirectory).catch(() => []))
-      .filter((name) => name.startsWith(splitPrefix) && name.endsWith('.m4a'))
-    for (const name of stagedOnFailure) await fs.promises.rm(path.join(segmentDirectory, name), { force: true })
-    if (error.code === 'transcript_cancelled') throw error
-    throw transcriptFailure(
-      'mimo_param_incorrect_split_failed',
-      'MiMo 返回 Param Incorrect，但当前音频片段无法安全拆分；原始片段已保留，请检查磁盘空间和音频文件后重试。',
-    )
+  const sourceDurationSeconds = probeAudioDuration(ffmpegPath, inputPath)
+  const splitRanges = sourceDurationSeconds ? planTranscriptSplitRanges(segment, sourceDurationSeconds) : null
+  const splitAttemptId = randomUUID()
+  const staged = splitRanges?.map((_, index) => path.join(segmentDirectory, `segment-${segment.id}-split-${splitAttemptId}-${index + 1}.m4a`)) || []
+  const finalPaths = []
+  const splitDiagnostics = {
+    taskId: task.id, segmentId: segment.id, reasonCode,
+    plannedSplitSeconds: splitRanges?.[0]?.sourceDurationSeconds ?? null,
+    sourceDurationSeconds: sourceDurationSeconds ?? null,
+    actualFileCount: 0, outputs: [], ffmpegError: null,
   }
-  const staged = (await fs.promises.readdir(segmentDirectory))
-    .filter((name) => name.startsWith(`segment-${segment.id}-split-`) && name.endsWith('.m4a'))
-    .sort((left, right) => left.localeCompare(right, 'en'))
-  if (staged.length !== 2) {
-    for (const name of staged) await fs.promises.rm(path.join(segmentDirectory, name), { force: true })
+  const phase = reasonCode === 'mimo_repetition_truncation' ? '检测到重复生成，正在缩小音频片段…'
+    : reasonCode === 'mimo_content_filtered' ? 'MiMo 安全过滤，正在拆分音频片段…'
+      : reasonCode === 'mimo_param_incorrect' ? 'MiMo 拒绝当前音频片段，正在安全拆分…' : '音频处理中'
+  const cleanup = async () => {
+    for (const filePath of [...staged, ...finalPaths]) await fs.promises.rm(filePath, { force: true }).catch(() => {})
+  }
+  const splitFailure = (cause) => {
+    log('warn', 'Transcript adaptive split failed', { ...splitDiagnostics, ffmpegError: cause || splitDiagnostics.ffmpegError || 'split_validation_failed' })
     if (reasonCode === 'mimo_param_incorrect') {
-      throw transcriptFailure(
-        'mimo_param_incorrect_split_failed',
-        'MiMo 返回 Param Incorrect，但没有生成完整的两个子片段；原始片段已保留，可重试。',
-      )
+      return transcriptFailure('mimo_param_incorrect_split_failed', 'MiMo 返回 Param Incorrect，但当前音频片段无法安全拆分；原始片段和 checkpoint 已保留，请检查磁盘空间和音频文件后重试。')
     }
-    throw transcriptFailure('transcript_segment_split_failed', '无法将被截断的音频片段安全拆分。')
+    return transcriptFailure('transcript_segment_split_failed', '无法将音频片段安全拆分；原始片段和 checkpoint 已保留，请检查音频文件后重试。')
   }
-  const children = []
-  let childStartSeconds = Number.isFinite(segment.startSeconds) ? segment.startSeconds : 0
-  const parentEndSeconds = Number.isFinite(segment.endSeconds) ? segment.endSeconds : null
-  const nextSegmentDepth = (segment.splitDepth || 0) + 1
-  const nextContentFilterDepth = isContentFilterSplit ? splitPlan.nextDepth : contentFilterSplitDepth
-  for (let index = 0; index < staged.length; index += 1) {
-    const id = `${segment.id}${index === 0 ? 'a' : 'b'}`
-    const audioFile = `segment-${id}.m4a`
-    const stagedPath = path.join(segmentDirectory, staged[index])
-    const finalPath = path.join(segmentDirectory, audioFile)
-    await fs.promises.rename(stagedPath, finalPath)
-    const stats = await fs.promises.stat(finalPath)
-    if (Math.ceil(stats.size / 3) * 4 > transcriptMaxBase64Bytes) throw transcriptFailure('audio_segment_too_large', '细分后的音频仍超过 MiMo Base64 安全大小。')
-    const measuredDurationSeconds = probeAudioDuration(ffmpegPath, finalPath) || splitPlan.childDurationSeconds
-    const childEndSeconds = index === staged.length - 1 && parentEndSeconds !== null
-      ? parentEndSeconds
-      : childStartSeconds + measuredDurationSeconds
-    const childDurationSeconds = Math.max(0, childEndSeconds - childStartSeconds)
-    children.push({
-      id, audioFile, startSeconds: childStartSeconds, endSeconds: childEndSeconds,
-      durationSeconds: childDurationSeconds, splitDepth: nextSegmentDepth,
-      contentFilterSplitDepth: nextContentFilterDepth, sizeBytes: stats.size,
+  try {
+    if (!splitRanges) throw new Error('source_duration_unavailable')
+    log('info', 'Transcript adaptive split planned', {
+      taskId: task.id, segmentId: segment.id, reasonCode,
+      sourceDurationSeconds, splitPointSeconds: splitRanges[0].sourceDurationSeconds,
+      plannedChildDurationsSeconds: splitRanges.map((range) => range.sourceDurationSeconds),
     })
-    childStartSeconds = childEndSeconds
+    for (let index = 0; index < splitRanges.length; index += 1) {
+      const range = splitRanges[index]
+      await runTranscriptProcess(task, ffmpegPath,
+        buildTranscriptSplitArgs(inputPath, staged[index], range.sourceStartSeconds, range.sourceDurationSeconds, transcriptBitrate), phase, { captureStderr: true })
+    }
+    splitDiagnostics.actualFileCount = staged.filter((filePath) => fs.existsSync(filePath)).length
+    for (let index = 0; index < staged.length; index += 1) {
+      const stats = await fs.promises.stat(staged[index]).catch(() => null)
+      const diagnostics = stats ? probeAudioDiagnostics(ffmpegPath, staged[index]) : null
+      const validationError = validateTranscriptSplitPart(stats, diagnostics, splitRanges[index].sourceDurationSeconds, transcriptMaxBase64Bytes)
+      splitDiagnostics.outputs.push({
+        fileIndex: index + 1, durationSeconds: diagnostics?.durationSeconds ?? null,
+        sizeBytes: stats?.size ?? 0, validationError,
+      })
+      if (validationError) throw new Error(validationError)
+    }
+    const children = []
+    const nextSegmentDepth = (segment.splitDepth || 0) + 1
+    const nextContentFilterDepth = isContentFilterSplit ? splitPlan.nextDepth : contentFilterSplitDepth
+    const outputNames = splitRanges.map((_, index) => transcriptSegmentFilename({ id: `${segment.id}${index === 0 ? 'a' : 'b'}` }))
+    const outputPaths = outputNames.map((name) => path.join(segmentDirectory, name))
+    if (outputPaths.some((filePath) => fs.existsSync(filePath))) throw new Error('child_output_already_exists')
+    await promoteTranscriptSplitFiles(staged, outputPaths, fs.promises.rename, fs.promises.rm)
+    finalPaths.push(...outputPaths)
+    for (let index = 0; index < splitRanges.length; index += 1) {
+      const id = `${segment.id}${index === 0 ? 'a' : 'b'}`
+      const audioFile = outputNames[index]
+      const finalPath = outputPaths[index]
+      const stats = await fs.promises.stat(finalPath)
+      const range = splitRanges[index]
+      children.push({
+        id, audioFile, startSeconds: range.startSeconds, endSeconds: range.endSeconds,
+        durationSeconds: range.endSeconds - range.startSeconds, splitDepth: nextSegmentDepth,
+        contentFilterSplitDepth: nextContentFilterDepth, sizeBytes: stats.size,
+      })
+    }
+    log('info', 'Transcript adaptive split verified', {
+      taskId: task.id, segmentId: segment.id, reasonCode,
+      plannedSplitSeconds: splitRanges[0].sourceDurationSeconds,
+      actualFileCount: splitDiagnostics.actualFileCount, outputs: splitDiagnostics.outputs,
+    })
+    return children
+  } catch (error) {
+    splitDiagnostics.actualFileCount = staged.filter((filePath) => fs.existsSync(filePath)).length
+    if (!splitDiagnostics.outputs.length) {
+      for (let index = 0; index < staged.length; index += 1) {
+        const stats = await fs.promises.stat(staged[index]).catch(() => null)
+        const diagnostics = stats ? probeAudioDiagnostics(ffmpegPath, staged[index]) : null
+        splitDiagnostics.outputs.push({
+          fileIndex: index + 1, durationSeconds: diagnostics?.durationSeconds ?? null,
+          sizeBytes: stats?.size ?? 0, validationError: stats ? null : 'not_generated',
+        })
+      }
+    }
+    splitDiagnostics.ffmpegError = error.code === 'transcript_process_failed'
+      ? (error.diagnostic || 'ffmpeg_exit_nonzero').replaceAll(inputPath, '<input>').replaceAll(workDirectory, '<work>').slice(0, 240)
+      : error.code === 'transcript_cancelled' ? 'cancelled'
+        : String(error.message || error.code || 'split_failed').slice(0, 160)
+    await cleanup()
+    if (error.code === 'transcript_cancelled') throw error
+    throw splitFailure(splitDiagnostics.ffmpegError)
   }
-  return children
 }
 
 function buildTranscriptPrompt(task, basePrompt) {
