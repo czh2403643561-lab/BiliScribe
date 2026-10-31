@@ -331,34 +331,42 @@ function hideLoginAvatar() {
 const transcripts = ref([])
 const activeTranscriptId = ref('')
 const transcriptQuery = ref('')
-const expandedTranscriptFolderIds = ref(new Set())
-const visibleTranscriptGroups = computed(() => {
-  const query = transcriptQuery.value.trim().toLowerCase()
-  const groups = []
+const currentTranscriptFolderId = ref('')
+const transcriptFolders = computed(() => {
   const folders = new Map()
   for (const item of transcripts.value) {
-    const folderName = item.folderName || ''
-    const itemMatches = `${item.title} ${item.creator}`.toLowerCase().includes(query)
-    if (!item.folderId) {
-      if (!query || itemMatches) groups.push({ id: item.id, type: 'item', item })
-      continue
-    }
+    if (!item.folderId) continue
     let folder = folders.get(item.folderId)
     if (!folder) {
-      folder = { id: item.folderId, type: 'folder', name: folderName, items: [], total: 0 }
+      folder = { id: item.folderId, name: item.folderName || '本地批次', items: [] }
       folders.set(item.folderId, folder)
-      groups.push(folder)
     }
-    folder.total += 1
-    if (!query || itemMatches || folderName.toLowerCase().includes(query)) folder.items.push(item)
+    folder.items.push(item)
   }
-  return groups.filter((group) => group.type === 'item' || group.items.length)
+  return [...folders.values()]
 })
-function toggleTranscriptFolder(id) {
-  const next = new Set(expandedTranscriptFolderIds.value)
-  if (next.has(id)) next.delete(id)
-  else next.add(id)
-  expandedTranscriptFolderIds.value = next
+const currentTranscriptFolder = computed(() => transcriptFolders.value.find((folder) => folder.id === currentTranscriptFolderId.value) || null)
+const visibleTranscriptFolders = computed(() => {
+  const query = transcriptQuery.value.trim().toLowerCase()
+  return transcriptFolders.value.filter((folder) => !query || folder.name.toLowerCase().includes(query)
+    || folder.items.some((item) => `${item.title} ${item.creator}`.toLowerCase().includes(query)))
+})
+const visibleUngroupedTranscripts = computed(() => {
+  const query = transcriptQuery.value.trim().toLowerCase()
+  return transcripts.value.filter((item) => !item.folderId && (!query || `${item.title} ${item.creator}`.toLowerCase().includes(query)))
+})
+const visibleFolderTranscripts = computed(() => {
+  const query = transcriptQuery.value.trim().toLowerCase()
+  return (currentTranscriptFolder.value?.items || []).filter((item) => !query || `${item.title} ${item.creator}`.toLowerCase().includes(query))
+})
+function enterTranscriptFolder(folder) {
+  currentTranscriptFolderId.value = folder.id
+  transcriptQuery.value = ''
+  activeTranscriptId.value = folder.items[0]?.id || activeTranscriptId.value
+}
+function leaveTranscriptFolder() {
+  currentTranscriptFolderId.value = ''
+  transcriptQuery.value = ''
 }
 const activeTranscript = computed(() => transcripts.value.find((item) => item.id === activeTranscriptId.value) || transcripts.value[0] || null)
 let transcriptTaskSignature = ''
@@ -368,6 +376,7 @@ async function refreshTranscriptLibrary() {
     if (!response.ok) return
     const result = await response.json()
     transcripts.value = result.transcripts || []
+    if (currentTranscriptFolderId.value && !transcriptFolders.value.some((folder) => folder.id === currentTranscriptFolderId.value)) currentTranscriptFolderId.value = ''
     if (!transcripts.value.some((item) => item.id === activeTranscriptId.value)) activeTranscriptId.value = transcripts.value[0]?.id || ''
   } catch { /* library appears when local service is available */ }
 }
@@ -548,8 +557,7 @@ async function openTranscriptTask(task) {
   }
   transcriptQuery.value = ''
   activeTranscriptId.value = transcriptId
-  const folderId = transcripts.value.find((item) => item.id === transcriptId)?.folderId
-  if (folderId) expandedTranscriptFolderIds.value = new Set([...expandedTranscriptFolderIds.value, folderId])
+  currentTranscriptFolderId.value = transcripts.value.find((item) => item.id === transcriptId)?.folderId || ''
   page.value = 'transcripts'
 }
 
@@ -942,12 +950,14 @@ onUnmounted(() => { clearInterval(taskPollTimer); clearInterval(qrPollTimer); cl
 
         <section v-else-if="page === 'transcripts'" class="page-content transcripts-page">
           <div class="page-heading"><div><div class="eyebrow">TRANSCRIPT LIBRARY</div><h1>文字稿</h1><p>查看、复制或导出已完成的文字稿。</p></div><div class="transcript-total"><BookOpenText :size="16" /><strong>{{ transcripts.length }}</strong> 篇文字稿</div></div>
-          <div v-if="transcripts.length" class="transcript-workspace panel"><aside class="transcript-sidebar"><div class="transcript-sidebar-head"><div><strong>全部文字稿</strong><span>{{ transcripts.length }} 篇</span></div><button class="icon-button" title="搜索文字稿"><Search :size="16" /></button></div><div class="transcript-search"><Search :size="15" /><input v-model="transcriptQuery" placeholder="搜索标题、课程或 UP 主" /></div><div class="transcript-items">
-              <template v-for="group in visibleTranscriptGroups" :key="group.id">
-                <button v-if="group.type === 'folder'" class="transcript-folder" :class="{ active: group.items.some((item) => item.id === activeTranscriptId) }" :aria-expanded="expandedTranscriptFolderIds.has(group.id) || !!transcriptQuery.trim()" @click="toggleTranscriptFolder(group.id)"><span class="transcript-item-icon"><FolderOpen :size="17" /></span><span class="transcript-item-copy"><strong>{{ group.name }}</strong><small>{{ group.total }} 篇文字稿</small></span><ChevronDown v-if="expandedTranscriptFolderIds.has(group.id) || transcriptQuery.trim()" :size="16" /><ChevronRight v-else :size="16" /></button>
-                <button v-for="item in group.type === 'folder' && (expandedTranscriptFolderIds.has(group.id) || transcriptQuery.trim()) ? group.items : group.type === 'item' ? [group.item] : []" :key="item.id" class="transcript-item" :class="{ active: activeTranscriptId === item.id, nested: group.type === 'folder' }" @click="activeTranscriptId = item.id"><span class="transcript-item-icon"><FileText :size="16" /></span><span class="transcript-item-copy"><strong>{{ item.title }}</strong><small><span class="transcript-source-tag">{{ item.sourceType === 'local' ? '本地' : 'B站' }}</span> {{ item.sourceType === 'local' ? '本地音频' : item.creator }} <i>·</i> {{ formatTranscriptDate(item.completedAt) }}</small></span><ChevronRight :size="15" class="transcript-item-arrow" /></button>
+          <div v-if="transcripts.length" class="transcript-workspace panel"><aside class="transcript-sidebar"><div class="transcript-sidebar-head"><div v-if="currentTranscriptFolder" class="transcript-folder-heading"><button class="transcript-back" aria-label="返回全部文字稿" @click="leaveTranscriptFolder"><ChevronLeft :size="18" /></button><div><small>全部文字稿 /</small><strong>{{ currentTranscriptFolder.name }}</strong></div><span>{{ currentTranscriptFolder.items.length }} 篇</span></div><div v-else><strong>全部文字稿</strong><span>{{ transcripts.length }} 篇</span></div></div><div class="transcript-search"><Search :size="15" /><input v-model="transcriptQuery" :placeholder="currentTranscriptFolder ? '搜索此文件夹' : '搜索文件夹或文字稿'" /></div><div class="transcript-items" :key="currentTranscriptFolderId || 'root'">
+              <template v-if="!currentTranscriptFolder">
+                <div v-if="visibleTranscriptFolders.length" class="transcript-section-label">文件夹</div>
+                <button v-for="folder in visibleTranscriptFolders" :key="folder.id" class="transcript-folder" @click="enterTranscriptFolder(folder)"><span class="transcript-item-icon"><FolderOpen :size="17" /></span><span class="transcript-item-copy"><strong>{{ folder.name }}</strong><small>{{ folder.items.length }} 篇文字稿</small></span><ChevronRight :size="16" /></button>
+                <div v-if="visibleUngroupedTranscripts.length" class="transcript-section-label">未归档文字稿</div>
               </template>
-              <div v-if="!visibleTranscriptGroups.length" class="empty-state transcript-no-results"><div class="empty-state-icon"><Search :size="15" /></div><strong>没有找到匹配的文字稿</strong><span>试试其他标题或课程名称。</span></div></div><div class="transcript-sidebar-foot"><span class="storage-icon"><HardDriveDownload :size="15" /></span><span>文字稿保存位置</span><button @click="page = 'settings'">查看设置<ChevronRight :size="13" /></button></div></aside>
+              <button v-for="item in currentTranscriptFolder ? visibleFolderTranscripts : visibleUngroupedTranscripts" :key="item.id" class="transcript-item" :class="{ active: activeTranscriptId === item.id }" @click="activeTranscriptId = item.id"><span class="transcript-item-icon"><FileText :size="16" /></span><span class="transcript-item-copy"><strong>{{ item.title }}</strong><small><span class="transcript-source-tag">{{ item.sourceType === 'local' ? '本地' : 'B站' }}</span> {{ item.sourceType === 'local' ? '本地音频' : item.creator }} <i>·</i> {{ formatTranscriptDate(item.completedAt) }}</small></span><ChevronRight :size="15" class="transcript-item-arrow" /></button>
+              <div v-if="currentTranscriptFolder ? !visibleFolderTranscripts.length : !visibleTranscriptFolders.length && !visibleUngroupedTranscripts.length" class="empty-state transcript-no-results"><div class="empty-state-icon"><Search :size="15" /></div><strong>没有找到匹配的文字稿</strong><span>试试其他标题或文件夹名称。</span></div></div><div class="transcript-sidebar-foot"><span class="storage-icon"><HardDriveDownload :size="15" /></span><span>文字稿保存位置</span><button @click="page = 'settings'">查看设置<ChevronRight :size="13" /></button></div></aside>
             <article class="transcript-reader"><div class="reader-top"><div class="reader-breadcrumb"><FileText :size="15" /><span>文字稿</span><ChevronRight :size="13" /><strong>{{ activeTranscript.title }}</strong></div><div class="reader-actions"><button class="outline-button" @click="copyTranscript"><Copy :size="15" />复制全文</button><button class="outline-button" @click="openTaskLocation({ id: activeTranscript.id })"><FolderOpen :size="15" />打开位置</button><button class="primary-button export-button" @click="exportTranscript"><Download :size="15" />导出 TXT</button></div></div><div class="reader-document"><div class="document-type"><span>课程转写</span><span class="document-dot"></span><span>完整文字稿</span></div><h2>{{ activeTranscript.title }}</h2><div class="document-meta"><span><UserRound :size="14" />{{ activeTranscript.creator }}</span><span><CalendarIcon />{{ formatTranscriptDate(activeTranscript.completedAt) }}</span><span><Clock3 :size="14" />{{ activeTranscript.wordCount }} 字</span></div><div class="document-rule"></div><div class="transcript-body"><p v-for="(paragraph, index) in activeTranscript.text.split('\n\n')" :key="index">{{ paragraph }}</p></div><div class="document-end"><span></span><small>正文结束</small><span></span></div></div><div class="reader-footer"><span><ShieldCheck :size="14" />保留讲师原话 · 未做总结和改写</span><span>共 {{ activeTranscript.wordCount }} 字</span></div></article></div>
           <div v-else class="empty-state panel transcript-page-empty"><div class="empty-state-icon"><BookOpenText :size="19" /></div><strong>还没有文字稿</strong><span>完成一次转写后，文字稿会显示在这里。</span></div>
         </section>
