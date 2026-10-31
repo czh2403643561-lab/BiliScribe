@@ -649,8 +649,14 @@ h1 { color: #1f2e42; font-size: 26px; letter-spacing: -.45px; }
 .transcript-search { height: 40px; margin: 14px 15px 12px; padding: 0 10px; color: #64758a; }
 .transcript-search input { color: #344256; font-size: 14px; }
 .transcript-search input::placeholder { color: #77869a; }
-.transcript-items { gap: 5px; padding: 0 10px; }
+.transcript-items { flex: 1; min-height: 0; gap: 5px; padding: 0 10px; overflow-y: auto; }
 .transcript-item { min-height: 74px; gap: 10px; padding: 10px; border-radius: 6px; }
+.transcript-item.nested { margin-left: 20px; border-left: 2px solid #e0e9ef; border-radius: 0 6px 6px 0; }
+.transcript-folder { display: flex; width: 100%; min-height: 65px; align-items: center; gap: 10px; padding: 10px; border: 1px solid #e3eaf0; border-radius: 7px; background: #eef4f8; color: #63768a; cursor: pointer; text-align: left; }
+.transcript-folder:hover, .transcript-folder.active { background: #e6f1f9; border-color: #cfe2f0; }
+.transcript-folder .transcript-item-icon { background: #dcecf7; color: #3987b5; }
+.transcript-folder .transcript-item-copy strong { color: #344d65; font-size: 14px; }
+.transcript-folder .transcript-item-copy small { color: #71879b; font-size: 12px; }
 .transcript-item-copy strong { color: #3a4c61; font-size: 14px; font-weight: 600; }
 .transcript-item-copy small { color: #67778b; font-size: 12px; }
 .transcript-sidebar-foot { padding: 14px 16px; color: #5f7085; font-size: 12px; }

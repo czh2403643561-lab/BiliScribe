@@ -2281,6 +2281,7 @@ async function runTranscriptTask(task) {
     const entry = {
       id: task.id, title: task.title, creator: task.source?.type === 'local' ? '本地音频' : task.creatorName || task.owner || '未知 UP 主',
       sourceType: task.source?.type === 'local' ? 'local' : 'bilibili', originalName: task.source?.originalName || '', bvid: task.bvid,
+      batchId: task.batchId || null, batchName: task.batchName || '',
       completedAt, textPath: outputPath, text, wordCount: Array.from(text.replace(/\s/gu, '')).length,
     }
     const library = readTranscriptLibrary().filter((item) => item.id !== task.id)
@@ -2422,8 +2423,13 @@ async function createLocalAudioTasks(request, response) {
     }
     return { selected, title: String(input.title.trim() || path.parse(selected.originalName).name).slice(0, 300) }
   })
+  const batchId = normalized.length > 1 ? randomUUID() : null
+  const commonGroup = normalized.length > 1 && normalized.every(({ selected }) => selected.groupName && selected.groupName === normalized[0].selected.groupName)
+    ? normalized[0].selected.groupName : ''
+  const batchName = batchId ? `${commonGroup || '本地批次'} · ${new Date().toLocaleString('zh-CN', { hour12: false })}` : ''
   const tasks = normalized.map(({ selected, title }) => ({
     id: randomUUID(), bvid: null, url: '', title, owner: '', creatorName: '', groupName: selected.groupName,
+    batchId, batchName,
     source: {
       type: 'local', path: selected.path, originalName: selected.originalName, size: selected.size,
       duration: selected.duration, mtimeMs: selected.mtimeMs, extension: selected.extension,
@@ -2554,7 +2560,10 @@ async function listTranscripts(response) {
   for (const item of entries) {
     try {
       const text = await fs.promises.readFile(item.textPath, 'utf8')
-      transcripts.push({ ...item, text })
+      const legacyFolderName = item.sourceType === 'local' && item.textPath ? path.basename(path.dirname(item.textPath)) : ''
+      const folderName = item.batchId ? item.batchName || '本地批次'
+        : legacyFolderName && legacyFolderName !== '未分组' ? legacyFolderName : ''
+      transcripts.push({ ...item, text, folderId: item.batchId || (folderName ? `legacy:${folderName}` : ''), folderName })
     } catch (error) {
       if (error.code !== 'ENOENT') log('warn', 'Transcript file could not be read', { transcriptId: item.id, code: error.code || 'transcript_read_failed' })
     }
