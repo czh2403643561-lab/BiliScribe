@@ -35,7 +35,10 @@ let bbdownServeToken = null
 let bbdownServeStarting = null
 const productionMode = process.argv.includes('--production')
 const distDirectory = path.join(projectRoot, 'dist')
-const stateDirectory = path.join(projectRoot, '.biliscribe')
+const testMode = process.env.BILISCRIBE_TEST_MODE === '1'
+const stateDirectory = path.resolve(process.env.BILISCRIBE_STATE_DIR || path.join(projectRoot, '.biliscribe'))
+const testMediaDirectory = process.env.BILISCRIBE_TEST_MEDIA_DIR ? path.resolve(process.env.BILISCRIBE_TEST_MEDIA_DIR) : ''
+const testFixturePath = path.join(projectRoot, 'fixtures', 'automation-sample.mp4')
 const stateFile = path.join(stateDirectory, 'state.json')
 const secretsFile = path.join(stateDirectory, 'secrets.json')
 const transcriptsFile = path.join(stateDirectory, 'transcripts.json')
@@ -60,8 +63,9 @@ let activeLocalAudioPicker = null
 const bilibiliImageHosts = ['hdslb.com', 'bilivideo.com']
 const wbiMixinIndices = [46, 47, 18, 2, 53, 8, 23, 32, 15, 50, 10, 31, 58, 3, 45, 35, 27, 43, 5, 49, 33, 9, 42, 19, 29, 28, 14, 39, 12, 38, 41, 13, 37, 48, 7, 16, 24, 55, 40, 61, 26, 17, 0, 1, 60, 51, 30, 4, 22, 25, 54, 21, 56, 59, 6, 63, 57, 62, 11, 36, 20, 34, 44, 52]
 
-let downloadDirectory = defaultDownloadDirectory
-let transcriptDirectory = defaultDownloadDirectory
+const testOutputDirectory = process.env.BILISCRIBE_TEST_OUTPUT_DIR || path.join(stateDirectory, 'output')
+let downloadDirectory = testMode ? testOutputDirectory : defaultDownloadDirectory
+let transcriptDirectory = testMode ? testOutputDirectory : defaultDownloadDirectory
 let mimoApiKey = ''
 const downloadTasks = new Map()
 let queuePumpActive = false
@@ -80,8 +84,10 @@ async function withMiMoRequestLock(callback) {
 }
 
 try {
-  const secrets = JSON.parse(fs.readFileSync(secretsFile, 'utf8'))
-  if (typeof secrets.mimoApiKey === 'string') mimoApiKey = secrets.mimoApiKey
+  if (!testMode) {
+    const secrets = JSON.parse(fs.readFileSync(secretsFile, 'utf8'))
+    if (typeof secrets.mimoApiKey === 'string') mimoApiKey = secrets.mimoApiKey
+  }
 } catch (error) {
   if (error.code !== 'ENOENT') log('warn', 'Local service credentials could not be loaded', { code: error.code || 'credentials_load_failed' })
 }
@@ -449,6 +455,22 @@ async function readJsonBody(request, maxBytes = 16 * 1024) {
   try { return JSON.parse(Buffer.concat(chunks).toString('utf8')) } catch {
     throw Object.assign(new Error('请求内容不是有效的 JSON。'), { statusCode: 400, code: 'invalid_json' })
   }
+}
+
+async function readBinaryBody(request, maxBytes) {
+  const chunks = []
+  let byteLength = 0
+  let tooLarge = false
+  for await (const chunk of request) {
+    byteLength += chunk.length
+    if (byteLength > maxBytes) {
+      tooLarge = true
+      continue
+    }
+    chunks.push(chunk)
+  }
+  if (tooLarge) throw Object.assign(new Error('上传文件不能超过 100 MB。'), { statusCode: 413, code: 'test_upload_too_large' })
+  return Buffer.concat(chunks)
 }
 
 function normalizeVideoUrl(input) {
@@ -1742,6 +1764,82 @@ function makeLocalAudioSelection(filePath, groupName = '', ffmpegPath = null) {
   return { id, originalName: item.originalName, extension, size: item.size, duration: item.duration, groupName }
 }
 
+async function createTestFixtureSelection(response) {
+  try {
+    if (!testMode) throw Object.assign(new Error('测试样例仅在隔离测试环境中可用。'), { statusCode: 404, code: 'test_fixture_unavailable' })
+    const ffmpegPath = findFFmpeg()
+    const candidates = testMediaDirectory && fs.existsSync(testMediaDirectory)
+      ? fs.readdirSync(testMediaDirectory, { withFileTypes: true })
+        .filter((entry) => entry.isFile() && localMediaExtensions.has(path.extname(entry.name).toLowerCase()))
+        .map((entry) => path.join(testMediaDirectory, entry.name))
+      : [testFixturePath]
+    const ranked = candidates.map((filePath) => ({ filePath, duration: ffmpegPath ? probeAudioDuration(ffmpegPath, filePath) : null }))
+      .filter((item) => Number.isFinite(item.duration) && item.duration > 0)
+      .sort((left, right) => left.duration - right.duration)
+    const selected = ranked[0]
+    const file = selected && makeLocalAudioSelection(selected.filePath, '自动化测试样例', ffmpegPath)
+    if (!file) throw Object.assign(new Error('测试目录中没有可读取的音视频；请检查文件或 FFmpeg。'), { statusCode: 503, code: 'test_fixture_missing' })
+    log('info', 'Automation test fixture selected', { extension: file.extension, size: file.size })
+    sendJson(response, 200, { files: [file], ignoredCount: 0, cancelled: false, testMode: true, transcription: '模拟结果，不会调用 MiMo' })
+  } catch (error) {
+    sendError(response, error.statusCode || 503, error.code || 'test_fixture_missing', error.message || '测试样例不可用。')
+  }
+}
+
+async function uploadTestMedia(request, response) {
+  if (!testMode) {
+    sendError(response, 404, 'test_upload_unavailable', '测试文件上传仅在隔离测试环境中可用。')
+    return
+  }
+  let originalName
+  try { originalName = decodeURIComponent(String(request.headers['x-file-name'] || '')) } catch {
+    sendError(response, 400, 'invalid_test_upload_name', '文件名无效，请重新选择文件。')
+    return
+  }
+  originalName = path.win32.basename(originalName.replaceAll('/', '\\'))
+  const extension = path.extname(originalName).toLowerCase()
+  if (!originalName || !localMediaExtensions.has(extension)) {
+    sendError(response, 415, 'unsupported_test_upload', '请选择 MP3、M4A、WAV、FLAC、OGG 或 MP4 文件。')
+    return
+  }
+  let bytes
+  try { bytes = await readBinaryBody(request, 100 * 1024 * 1024) } catch (error) {
+    sendError(response, error.statusCode || 400, error.code || 'invalid_test_upload', error.message || '文件上传失败。')
+    return
+  }
+  if (!bytes.length) {
+    sendError(response, 400, 'empty_test_upload', '所选文件为空。')
+    return
+  }
+  const uploadDirectory = path.join(stateDirectory, 'test-uploads', randomUUID())
+  await fs.promises.mkdir(uploadDirectory, { recursive: true })
+  const uploadPath = path.join(uploadDirectory, originalName)
+  try {
+    await fs.promises.writeFile(uploadPath, bytes, { flag: 'wx' })
+    const file = makeLocalAudioSelection(uploadPath, '浏览器上传测试', findFFmpeg())
+    if (!file) throw Object.assign(new Error('无法读取该音视频，请检查文件格式或是否损坏。'), { statusCode: 422, code: 'test_upload_unreadable' })
+    log('info', 'Automation test media uploaded', { extension, size: bytes.length })
+    sendJson(response, 201, { files: [file], testMode: true, transcription: '模拟结果，不会调用 MiMo' })
+  } catch (error) {
+    await fs.promises.rm(uploadPath, { force: true }).catch(() => {})
+    await fs.promises.rmdir(uploadDirectory).catch(() => {})
+    sendError(response, error.statusCode || 422, error.code || 'test_upload_unreadable', error.message || '无法读取该音视频。')
+  }
+}
+
+async function mockTranscriptSegment(task, segment) {
+  setTranscriptPhase(task, '模拟转写处理中（不会调用 MiMo）')
+  await new Promise((resolve) => setTimeout(resolve, 2500))
+  const text = await fs.promises.readFile(path.join(projectRoot, 'fixtures', 'expected-transcript.txt'), 'utf8')
+  task.transcriptProgress = {
+    ...(task.transcriptProgress || {}), generatedCharacters: Array.from(text).length,
+    completedSegments: task.transcriptProgress?.completedSegments || 0,
+    segmentCount: task.transcriptProgress?.segmentCount || 1,
+    currentSegment: segment?.id || '001',
+  }
+  return cleanTranscriptText(text)
+}
+
 async function selectLocalAudio(response, kind) {
   pruneLocalAudioSelections()
   const controller = new AbortController()
@@ -1979,7 +2077,7 @@ async function runTranscriptTask(task) {
       saveLocalState()
       log('info', 'Local transcript source verified', { taskId: task.id, size: sourceStats.size })
     }
-    if (!mimoApiKey) throw transcriptFailure('mimo_key_missing', '请先在设置中配置 MiMo API Key。')
+    if (!mimoApiKey && !testMode) throw transcriptFailure('mimo_key_missing', '请先在设置中配置 MiMo API Key。')
     const ffmpegPath = findFFmpeg()
     if (!ffmpegPath) throw transcriptFailure('ffmpeg_unavailable', '未找到 FFmpeg，请安装后重试转写。')
     if (task.source?.type === 'local' && isLocalMp4(sourceAudio)) {
@@ -2144,11 +2242,13 @@ async function runTranscriptTask(task) {
       const resumedSegment = completed.size > 0 && cursor === firstPending
       setTranscriptPhase(task, resumedSegment ? `已恢复进度，继续转写 ${cursor + 1} / ${segments.length}` : `转写 ${cursor + 1} / ${segments.length}`)
       saveTranscriptCheckpoint(ownedWorkDirectory, checkpoint)
-      log('info', 'MiMo transcript segment started', { taskId: task.id, bvid: task.bvid, segment: cursor + 1, segmentId: segment.id, segmentCount: segments.length })
+      log('info', testMode ? 'Simulated transcript segment started' : 'MiMo transcript segment started', { taskId: task.id, bvid: task.bvid, segment: cursor + 1, segmentId: segment.id, segmentCount: segments.length })
       const segmentStartedAt = Date.now()
       try {
         const audioPath = path.join(segmentDirectory, transcriptSegmentFilename(segment))
-        const text = await callMiMoForSegment(task, prompt, audioPath, cursor + 1, segments.length, segment, ffmpegPath)
+        const text = testMode
+          ? await mockTranscriptSegment(task, segment)
+          : await callMiMoForSegment(task, prompt, audioPath, cursor + 1, segments.length, segment, ffmpegPath)
         writeTranscriptSegmentText(ownedWorkDirectory, segment.id, text)
         completed.add(segment.id)
         checkpoint.completedSegments = segments.filter((item) => completed.has(item.id)).map((item) => item.id)
@@ -2156,7 +2256,7 @@ async function runTranscriptTask(task) {
         task.transcriptProgress = { completedSegments: completed.size, segmentCount: segments.length, currentSegment: checkpoint.currentSegment }
         saveTranscriptCheckpoint(ownedWorkDirectory, checkpoint)
         saveLocalState()
-        log('info', 'MiMo transcript segment completed', {
+        log('info', testMode ? 'Simulated transcript segment completed' : 'MiMo transcript segment completed', {
           taskId: task.id, bvid: task.bvid, segment: cursor + 1, segmentId: segment.id,
           model: 'mimo-v2.6-flash', durationMs: Date.now() - segmentStartedAt, textLength: text.length,
         })
@@ -2473,6 +2573,10 @@ async function saveDownloadDirectory(request, response) {
 
 async function saveAppSettings(request, response) {
   const body = await readJsonBody(request)
+  if (testMode && (body.apiKey || body.apiKey === null)) {
+    sendError(response, 403, 'test_mode_credentials_disabled', '隔离测试环境不接受或保存 API Key。')
+    return
+  }
   if ((typeof body.downloadDirectory === 'string' && body.downloadDirectory.trim() && !path.isAbsolute(body.downloadDirectory.trim()))
     || (typeof body.transcriptDirectory === 'string' && body.transcriptDirectory.trim() && !path.isAbsolute(body.transcriptDirectory.trim()))) {
     sendError(response, 400, 'invalid_settings_path', '保存目录必须是本机绝对路径。')
@@ -2491,7 +2595,7 @@ async function saveAppSettings(request, response) {
     sendError(response, 400, error.code || 'settings_directory_unwritable', error.message || '保存目录不可写。')
     return
   }
-  if (typeof body.apiKey === 'string' && body.apiKey.trim()) {
+  if (!testMode && typeof body.apiKey === 'string' && body.apiKey.trim()) {
     try { saveMimoApiKey(body.apiKey.trim()) } catch (error) {
       log('error', 'MiMo API Key could not be saved', { code: error.code || 'mimo_key_save_failed' })
       sendError(response, 500, 'mimo_key_save_failed', 'MiMo API Key 保存失败。')
@@ -2506,10 +2610,14 @@ async function saveAppSettings(request, response) {
   transcriptDirectory = nextTranscript
   saveLocalState()
   log('info', 'Local settings saved', { hasMimoApiKey: !!mimoApiKey, downloadDirectory, transcriptDirectory })
-  sendJson(response, 200, { downloadDirectory, transcriptDirectory, mimoApiKeyConfigured: !!mimoApiKey, mimoApiKeyMask: maskMimoApiKey() })
+  sendJson(response, 200, { downloadDirectory, transcriptDirectory, mimoApiKeyConfigured: !!mimoApiKey, mimoApiKeyMask: maskMimoApiKey(), testMode })
 }
 
 async function testMiMoConnection(request, response) {
+  if (testMode) {
+    sendError(response, 403, 'test_mode_mimo_disabled', '隔离测试环境不会连接 MiMo。')
+    return
+  }
   const body = await readJsonBody(request)
   const key = typeof body.apiKey === 'string' && body.apiKey.trim() ? body.apiKey.trim() : mimoApiKey
   if (!key) {
@@ -2761,6 +2869,7 @@ const server = http.createServer(async (request, response) => {
       sendJson(response, 200, {
         status: 'ok',
         mode: productionMode ? 'production' : 'development',
+        testMode,
         webUrl: productionMode ? `http://127.0.0.1:${port}/` : process.env.BILISCRIBE_WEB_URL || null,
         bbdownAvailable: fs.existsSync(executablePath),
         bbdownVersion,
@@ -2777,7 +2886,7 @@ const server = http.createServer(async (request, response) => {
       await parseCreatorHomepage(request, response)
       statusCode = response.statusCode || 200
     } else if (method === 'GET' && pathname === '/api/settings') {
-      sendJson(response, 200, { downloadDirectory, transcriptDirectory, mimoApiKeyConfigured: !!mimoApiKey, mimoApiKeyMask: maskMimoApiKey() })
+      sendJson(response, 200, { downloadDirectory, transcriptDirectory, mimoApiKeyConfigured: !!mimoApiKey, mimoApiKeyMask: maskMimoApiKey(), testMode })
     } else if (method === 'PUT' && pathname === '/api/settings') {
       await saveAppSettings(request, response)
       statusCode = response.statusCode || 200
@@ -2786,6 +2895,12 @@ const server = http.createServer(async (request, response) => {
       statusCode = response.statusCode || 200
     } else if (method === 'POST' && pathname === '/api/local-audio/select-files') {
       await selectLocalAudio(response, 'files')
+      statusCode = response.statusCode || 200
+    } else if (method === 'POST' && pathname === '/api/local-audio/test-fixture') {
+      await createTestFixtureSelection(response)
+      statusCode = response.statusCode || 200
+    } else if (method === 'POST' && pathname === '/api/local-audio/test-upload') {
+      await uploadTestMedia(request, response)
       statusCode = response.statusCode || 200
     } else if (method === 'POST' && pathname === '/api/local-audio/select-folder') {
       await selectLocalAudio(response, 'folder')

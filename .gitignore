@@ -3,3 +3,5 @@ dist/
 logs/
 tools/BBDownNext/BBDown.data
 .biliscribe/
+.biliscribe-test/
+TEST_HANDOFF.local.md

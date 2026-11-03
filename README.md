@@ -14,7 +14,7 @@ BiliScribe 是运行在 Windows 本地的 B 站视频下载与文字稿生成工
 
 ## 当前阶段
 
-当前已进入真实功能接入阶段：本地后台通过 BBDownNext 解析单个 B 站视频，向前端返回统一格式的视频信息；设置页支持 BBDownNext WEB 扫码登录并在本机持久保存凭据。UP 主主页、真实下载、音频下载、MiMo 转写和后台任务执行尚未接入，其余页面交互仍为原型数据。
+当前版本已接入 B 站解析、UP 主视频列表、串行下载与 MiMo 转写、本地音视频导入、任务中心及文字稿库。自动化验收方式见 `TESTING.md`；隔离测试模式模拟转写且不连接 MiMo。
 
 ## 运行
 
@@ -28,6 +28,8 @@ BiliScribe 是运行在 Windows 本地的 B 站视频下载与文字稿生成工
 npm install
 npm run dev
 ```
+
+本机自动化测试请使用 `npm run test:local`。它在独立端口和数据目录启动，模拟文字稿，不读取 API Key、不调用 MiMo。具体素材配置与页面流程见 `TESTING.md`。
 
 正式服务将前端页面和 API 一起托管在 `http://127.0.0.1:4174`；开发页面默认地址为 `http://127.0.0.1:5173`，API 后台端口为 `4174`。两种模式均仅监听本机回环地址。手动启动正式模式时先运行 `npm run build`，再运行 `npm run start`；缺少构建页面时 `start` 会给出清楚错误。`npm run dev:api` 和 `npm run dev:ui` 可分别启动开发后台和前端。日志写入 `logs/biliscribe.log`，超过大小上限会轮换。
 

@@ -1,0 +1,42 @@
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+
+const task = await taskSpace(`BiliScribe smoke ${new Date().toISOString()}`);
+const page = task.page("p1");
+await page.goto("http://127.0.0.1:5174/");
+await page.snapshot();
+await page.click('loc=role:tab[name="本地音视频"]');
+await page.snapshot();
+const scriptDirectory = dirname(fileURLToPath(import.meta.url));
+await page.setInputFiles('[data-testid="test-file-upload"]', [resolve(scriptDirectory, "../fixtures/automation-sample.mp4")]);
+await page.waitForFunction(() => document.body.innerText.includes("1 个已导入"), undefined, { timeout: 15_000 });
+await page.snapshot();
+const taskTitle = await page.evaluate(() => document.querySelector(".local-audio-title")?.value);
+if (!taskTitle) throw new Error("The local sample title was not visible.");
+const createdAfter = Date.now();
+await page.click('[data-testid="create-transcript-task"]');
+await page.waitForSelector('[data-testid="task-progress"]', { timeout: 15_000 });
+const progressLabel = await page.evaluate(() => document.querySelector('[data-testid="task-progress"]')?.innerText || "");
+if (!progressLabel) throw new Error("The processing status was not exposed to automation.");
+await page.waitForFunction(async ({ expectedTitle, createdAfter }) => {
+  const response = await fetch("/api/tasks");
+  const result = await response.json();
+  return result.tasks?.some((item) => item.mode === "transcript" && item.status === "completed" && item.title === expectedTitle && Date.parse(item.createdAt) >= createdAfter);
+}, { expectedTitle: taskTitle, createdAfter }, { timeout: 45_000 });
+const finishedTask = await page.evaluate(async ({ expectedTitle, createdAfter }) => {
+  const response = await fetch("/api/tasks");
+  const result = await response.json();
+  return result.tasks?.find((item) => item.mode === "transcript" && item.status === "completed" && item.title === expectedTitle && Date.parse(item.createdAt) >= createdAfter);
+}, { expectedTitle: taskTitle, createdAfter });
+if (!finishedTask?.id) throw new Error("The new test task ID was not returned by the page API.");
+await page.click('loc=role:button[name="文字稿"]');
+await page.click('text="浏览器上传测试"');
+await page.snapshot();
+const resultRowFound = await page.evaluate((id) => !!document.querySelector(`button[data-task-id="${id}"]`), finishedTask.transcriptId || finishedTask.id);
+if (!resultRowFound) throw new Error("The completed task was not listed in the transcript folder.");
+await page.click(`button[data-task-id="${finishedTask.transcriptId || finishedTask.id}"]`);
+await page.waitForFunction(() => document.querySelector(".transcript-body")?.innerText.includes("这是 BiliScribe 自动化测试样例。"), undefined, { timeout: 15_000 });
+const visibleResult = await page.evaluate(() => ({ title: document.querySelector(".reader-document h2")?.innerText, text: document.querySelector(".transcript-body")?.innerText }));
+if (visibleResult.title !== taskTitle || !visibleResult.text?.includes("测试完成。")) throw new Error("The newly uploaded task transcript was not opened.");
+console.log({ progressLabel, result: await page.snapshot(), expected: "fixtures/expected-transcript.txt" });
+await task.finish({ keep: ["p1"] });

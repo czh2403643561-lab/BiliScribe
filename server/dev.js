@@ -6,6 +6,15 @@ import { fileURLToPath } from 'node:url'
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const apiFile = fileURLToPath(new URL('./api.js', import.meta.url))
 const viteCli = path.join(projectRoot, 'node_modules', 'vite', 'bin', 'vite.js')
+const testMode = process.argv.includes('--test-mode')
+if (testMode) {
+  process.env.BILISCRIBE_TEST_MODE = '1'
+  process.env.BILISCRIBE_API_PORT = '4175'
+  process.env.BILISCRIBE_WEB_PORT = '5174'
+  process.env.BILISCRIBE_STATE_DIR = path.join(projectRoot, '.biliscribe-test')
+  process.env.BILISCRIBE_LOG_DIR = path.join(projectRoot, '.biliscribe-test', 'logs')
+  process.env.BILISCRIBE_TEST_OUTPUT_DIR = path.join(projectRoot, '.biliscribe-test', 'output')
+}
 const children = []
 let shuttingDown = false
 
@@ -34,7 +43,9 @@ function shutdown(exitCode = 0) {
   setTimeout(() => process.exit(exitCode), 250).unref()
 }
 
-console.log('启动本地后台与 Vue 开发服务器（按 Ctrl+C 一并关闭）')
+console.log(testMode
+  ? '启动隔离的本机测试环境（模拟转写，不调用 MiMo、不产生 API 费用；按 Ctrl+C 关闭）'
+  : '启动本地后台与 Vue 开发服务器（按 Ctrl+C 一并关闭）')
 
 async function findAvailablePort(firstPort) {
   for (let port = firstPort; port < firstPort + 100; port++) {

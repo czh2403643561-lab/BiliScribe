@@ -39,6 +39,7 @@ const localAudioFiles = ref([])
 const localAudioSelectedIds = ref(new Set())
 const localAudioPickerBusy = ref('')
 const localAudioNotice = ref('')
+const testModeEnabled = ref(false)
 const selectedLocalAudioCount = computed(() => localAudioSelectedIds.value.size)
 const isCreatorInput = computed(() => /^https?:\/\/(?:www\.)?space\.bilibili\.com\/\d+(?:\/|\?|$)/i.test(url.value.trim()))
 const currentPage = ref(1)
@@ -451,6 +452,7 @@ async function refreshSettings() {
     settingsReady = true
     apiKeyConfigured.value = !!result.mimoApiKeyConfigured
     apiKeyMask.value = result.mimoApiKeyMask || ''
+    testModeEnabled.value = !!result.testMode
   } catch { /* settings appear when local service is available */ }
 }
 function markSettingsSaved() {
@@ -484,6 +486,59 @@ async function selectLocalAudio(kind) {
     notify(error.message || '本地音频导入失败。')
   } finally {
     localAudioPickerBusy.value = ''
+  }
+}
+
+async function loadTestFixture() {
+  if (localAudioPickerBusy.value) return
+  localAudioPickerBusy.value = 'fixture'
+  localAudioNotice.value = ''
+  try {
+    const response = await fetch('/api/local-audio/test-fixture', { method: 'POST' })
+    const result = await response.json()
+    if (!response.ok) throw new Error(result.error?.message || '无法载入测试音视频。')
+    const existingIds = new Set(localAudioFiles.value.map((file) => file.id))
+    const files = (result.files || []).filter((file) => !existingIds.has(file.id))
+      .map((file) => ({ ...file, title: file.originalName.replace(/\.[^.]+$/, '') }))
+    localAudioFiles.value = [...localAudioFiles.value, ...files]
+    localAudioSelectedIds.value = new Set([...localAudioSelectedIds.value, ...files.map((file) => file.id)])
+    if (files.length) notify(`已载入最短样例：${files[0].originalName}；模拟转写，不会产生 MiMo 费用`)
+  } catch (error) {
+    localAudioNotice.value = error.message || '无法载入测试音视频。'
+    notify(localAudioNotice.value)
+  } finally {
+    localAudioPickerBusy.value = ''
+  }
+}
+
+async function uploadTestMedia(event) {
+  const pickedFiles = [...(event.target.files || [])]
+  if (!pickedFiles.length || localAudioPickerBusy.value) return
+  localAudioPickerBusy.value = 'upload'
+  try {
+    for (const file of pickedFiles) {
+      const response = await fetch('/api/local-audio/test-upload', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/octet-stream', 'X-File-Name': encodeURIComponent(file.name) },
+        body: file,
+      })
+      const result = await response.json()
+      if (!response.ok) throw new Error(result.error?.message || `无法上传 ${file.name}。`)
+      const item = result.files?.[0]
+      if (!item) throw new Error(`服务没有接收 ${file.name}。`)
+      const alreadyAdded = localAudioFiles.value.some((existing) => existing.originalName === item.originalName && existing.size === item.size)
+      if (!alreadyAdded) {
+        localAudioFiles.value.push({ ...item, title: item.originalName.replace(/\.[^.]+$/, '') })
+        localAudioSelectedIds.value = new Set([...localAudioSelectedIds.value, item.id])
+      }
+    }
+    notify(`已上传 ${pickedFiles.length} 个测试文件；转写为模拟结果，不会产生 MiMo 费用`)
+  } catch (error) {
+    localAudioNotice.value = error.message || '测试文件上传失败。'
+    notify(localAudioNotice.value)
+  } finally {
+    localAudioPickerBusy.value = ''
+    event.target.value = ''
   }
 }
 
@@ -840,13 +895,13 @@ onUnmounted(() => { clearInterval(taskPollTimer); clearInterval(qrPollTimer); cl
     <main class="main-area">
       <header class="topbar">
         <div class="breadcrumbs"><span>工作区</span><ChevronRight :size="14" /><strong>{{ navItems.find((item) => item.id === page)?.label }}</strong></div>
-        <div class="topbar-actions"><span class="prototype-pill"><span></span>本地原型</span></div>
+        <div class="topbar-actions"><span v-if="testModeEnabled" class="test-mode-pill" role="status">测试环境：模拟转写，不调用 MiMo</span><span v-else class="prototype-pill"><span></span>本地原型</span></div>
       </header>
 
       <div class="page-scroll">
         <section v-if="page === 'new'" class="page-content new-page">
           <div class="page-heading">
-            <div><div class="eyebrow">BILISCRIBE WORKSPACE</div><h1>新建任务</h1><p>{{ newTaskSource === 'local' ? '导入本机音频，使用当前 MiMo 配置生成文字稿。' : '粘贴视频或 UP 主链接，选择你要处理的内容。' }}</p></div>
+            <div><div class="eyebrow">BILISCRIBE WORKSPACE</div><h1>新建任务</h1><p>{{ newTaskSource === 'local' ? (testModeEnabled ? '导入样例并使用模拟转写，自动化测试不连接外部服务。' : '导入本机音频，使用当前 MiMo 配置生成文字稿。') : '粘贴视频或 UP 主链接，选择你要处理的内容。' }}</p></div>
             <div class="heading-note"><ShieldCheck :size="16" /><span>所有操作均在本机进行</span></div>
           </div>
 
@@ -858,7 +913,7 @@ onUnmounted(() => { clearInterval(taskPollTimer); clearInterval(qrPollTimer); cl
           <template v-if="newTaskSource === 'bilibili'">
           <div class="link-panel panel">
             <div class="link-panel-title"><div class="step-icon"><Link2 :size="18" /></div><div><strong>添加 B 站链接</strong><span>支持单个视频或 UP 主主页</span></div><span class="supported-tag">Bilibili</span></div>
-            <div class="link-entry"><div class="url-input-wrap"><Link2 :size="17" /><input v-model="url" aria-label="B站视频或UP主主页链接" placeholder="粘贴 B 站视频或 UP 主主页链接" @keydown.enter="parseLink" /><button v-if="url" class="input-clear" aria-label="清空链接" @click="url = ''"><X :size="15" /></button></div><button class="primary-button parse-button" :disabled="isParsing" @click="parseLink"><LoaderCircle v-if="isParsing" class="spin" :size="16" /><Search v-else :size="16" />{{ isParsing ? '解析中' : '解析链接' }}</button></div>
+            <div class="link-entry"><div class="url-input-wrap"><Link2 :size="17" /><input v-model="url" aria-label="B站视频或UP主主页链接" data-testid="video-url" placeholder="粘贴 B 站视频或 UP 主主页链接" @keydown.enter="parseLink" /><button v-if="url" class="input-clear" aria-label="清空链接" @click="url = ''"><X :size="15" /></button></div><button class="primary-button parse-button" data-testid="parse-link" :disabled="isParsing" @click="parseLink"><LoaderCircle v-if="isParsing" class="spin" :size="16" /><Search v-else :size="16" />{{ isParsing ? '解析中' : '解析链接' }}</button></div>
             <div class="demo-hints"><span class="hint-label">快速测试</span><button @click="setDemoLink('video')">测试视频</button><i></i><button @click="setDemoLink('creator')">测试 UP 主</button><i></i><button @click="setDemoLink('failed')">无效视频</button><i></i><button @click="setDemoLink('invalid')">非法链接</button><span class="hint-footnote">通过本地后台读取 B 站公开信息</span></div>
           </div>
 
@@ -902,8 +957,10 @@ onUnmounted(() => { clearInterval(taskPollTimer); clearInterval(qrPollTimer); cl
           </template>
           <div v-else class="local-audio-panel panel">
             <div class="local-audio-heading">
-              <div><div class="eyebrow">LOCAL MEDIA</div><h2>本地音视频转写</h2><p>导入本机音频或视频，使用当前 MiMo 配置生成文字稿。</p></div>
+              <div><div class="eyebrow">LOCAL MEDIA</div><h2>本地音视频转写</h2><p>{{ testModeEnabled ? '测试环境会选取目录中的最短音视频并生成模拟文字稿，不会调用 MiMo 或产生 API 费用。' : '导入本机音频或视频，使用当前 MiMo 配置生成文字稿。' }}</p></div>
               <div class="local-audio-actions">
+                <button v-if="testModeEnabled" class="outline-button" :disabled="!!localAudioPickerBusy" aria-label="载入目录中最短的测试音视频" @click="loadTestFixture">{{ localAudioPickerBusy === 'fixture' ? '正在载入样例' : '载入最短测试样例' }}</button>
+                <label v-if="testModeEnabled" class="test-upload-control">上传测试音视频<input type="file" data-testid="test-file-upload" aria-label="上传测试音视频文件" accept=".mp3,.m4a,.wav,.flac,.ogg,.mp4" multiple :disabled="!!localAudioPickerBusy" @change="uploadTestMedia" /></label>
                 <button class="outline-button" :disabled="!!localAudioPickerBusy" @click="selectLocalAudio('files')"><LoaderCircle v-if="localAudioPickerBusy === 'files'" class="spin" :size="15" /><FileAudio v-else :size="15" />选择文件</button>
                 <button class="primary-button" :disabled="!!localAudioPickerBusy" @click="selectLocalAudio('folder')"><LoaderCircle v-if="localAudioPickerBusy === 'folder'" class="spin" :size="15" /><FolderOpen v-else :size="15" />选择文件夹</button>
               </div>
@@ -928,7 +985,7 @@ onUnmounted(() => { clearInterval(taskPollTimer); clearInterval(qrPollTimer); cl
               </div>
             </div>
             <div v-else class="local-audio-empty"><FileAudio :size="24" /><strong>还没有导入音视频</strong><span>可以多选音频或 MP4 文件，或选择一个文件夹导入其中的文件。</span></div>
-            <div class="local-audio-footer"><span>已选择 <strong>{{ selectedLocalAudioCount }}</strong> 个</span><button class="primary-button" :disabled="!selectedLocalAudioCount || !!localAudioPickerBusy" @click="createLocalAudioTasks"><FileText :size="15" />创建 {{ selectedLocalAudioCount }} 个转写任务</button></div>
+            <div class="local-audio-footer"><span>已选择 <strong>{{ selectedLocalAudioCount }}</strong> 个</span><button class="primary-button" data-testid="create-transcript-task" :disabled="!selectedLocalAudioCount || !!localAudioPickerBusy" @click="createLocalAudioTasks"><FileText :size="15" />创建 {{ selectedLocalAudioCount }} 个转写任务</button></div>
           </div>
         </section>
 
@@ -937,7 +994,7 @@ onUnmounted(() => { clearInterval(taskPollTimer); clearInterval(qrPollTimer); cl
           <div class="task-section panel">
             <div class="task-toolbar"><div class="filter-tabs"><button :class="{ active: taskTab === 'active' }" @click="taskTab = 'active'">正在处理<span v-if="activeTasks.length">{{ activeTasks.length }}</span></button><button :class="{ active: taskTab === 'history' }" @click="taskTab = 'history'">已完成<span v-if="historyTasks.length">{{ historyTasks.length }}</span></button></div></div>
             <div v-if="taskTab === 'active'" class="download-list">
-              <div v-if="runningTask" class="download-row running-row"><div class="task-type-icon" :class="runningTask.mode"><component :is="taskIcon[runningTask.mode]" :size="19" /></div><div class="download-task-main"><div class="download-task-title"><strong>{{ runningTask.title }}</strong><span class="download-mode">{{ taskDisplayName(runningTask) }}</span></div><div class="download-phase"><span class="task-status running">{{ runningTask.phase || '准备中' }}</span><span v-if="runningTask.mode === 'transcript' && runningTask.transcriptProgress?.generatedCharacters">已生成 {{ runningTask.transcriptProgress.generatedCharacters }} 字</span><span v-else>{{ runningTask.source?.type === 'local' ? '本地音频' : runningTask.owner }}</span></div><div class="download-progress-track" role="progressbar" aria-label="下载处理中"><span v-if="typeof runningTask.progress === 'number'" :style="{ width: `${runningTask.progress}%` }"></span><i v-else></i></div><span v-if="typeof runningTask.progress === 'number'" class="real-progress-label">{{ runningTask.progress }}%</span></div><button class="cancel-button" :disabled="runningTask.phase === '正在取消'" @click="requestCancelRunning(runningTask)"><X :size="14" />{{ runningTask.phase === '正在取消' ? '正在取消' : '取消' }}</button></div>
+              <div v-if="runningTask" class="download-row running-row"><div class="task-type-icon" :class="runningTask.mode"><component :is="taskIcon[runningTask.mode]" :size="19" /></div><div class="download-task-main"><div class="download-task-title"><strong>{{ runningTask.title }}</strong><span class="download-mode">{{ taskDisplayName(runningTask) }}</span></div><div class="download-phase" data-testid="task-progress" aria-live="polite" aria-atomic="true"><span class="task-status running">{{ runningTask.phase || '准备中' }}</span><span v-if="runningTask.mode === 'transcript' && runningTask.transcriptProgress?.generatedCharacters">{{ testModeEnabled ? '模拟输出' : '临时输出' }} {{ runningTask.transcriptProgress.generatedCharacters }} 字（尚未保存）</span><span v-else>{{ runningTask.source?.type === 'local' ? '本地音视频' : runningTask.owner }}</span></div><div class="download-progress-track" role="progressbar" :aria-label="`${runningTask.title}处理状态`"><span v-if="typeof runningTask.progress === 'number'" :style="{ width: `${runningTask.progress}%` }"></span><i v-else></i></div><span v-if="typeof runningTask.progress === 'number'" class="real-progress-label">{{ runningTask.progress }}%</span></div><button class="cancel-button" :disabled="runningTask.phase === '正在取消'" aria-label="取消当前任务" @click="requestCancelRunning(runningTask)"><X :size="14" />{{ runningTask.phase === '正在取消' ? '正在取消' : '取消' }}</button></div>
               <div v-for="(task, index) in waitingTasks" :key="task.id" class="download-row waiting-row"><div class="queue-index">{{ String(index + 1).padStart(2, '0') }}</div><div class="task-type-icon" :class="task.mode"><component :is="taskIcon[task.mode]" :size="18" /></div><div class="download-task-main"><div class="download-task-title"><strong>{{ task.title }}</strong><span class="download-mode">{{ taskDisplayName(task) }}</span></div><div class="download-phase"><span class="task-status waiting">等待中</span><span>{{ task.source?.type === 'local' ? '本地音频' : task.owner }}</span></div></div><button class="remove-button" @click="removeWaitingTask(task)"><Trash2 :size="14" />移除</button></div>
               <div v-if="!activeTasks.length" class="empty-state task-empty"><div class="empty-state-icon"><ListChecks :size="19" /></div><strong>当前没有待处理任务</strong><span>新建下载或转写任务后会在这里显示。</span></div>
             </div>
@@ -956,7 +1013,7 @@ onUnmounted(() => { clearInterval(taskPollTimer); clearInterval(qrPollTimer); cl
                 <button v-for="folder in visibleTranscriptFolders" :key="folder.id" class="transcript-folder" @click="enterTranscriptFolder(folder)"><span class="transcript-item-icon"><FolderOpen :size="17" /></span><span class="transcript-item-copy"><strong>{{ folder.name }}</strong><small>{{ folder.items.length }} 篇文字稿</small></span><ChevronRight :size="16" /></button>
                 <div v-if="visibleUngroupedTranscripts.length" class="transcript-section-label">未归档文字稿</div>
               </template>
-              <button v-for="item in currentTranscriptFolder ? visibleFolderTranscripts : visibleUngroupedTranscripts" :key="item.id" class="transcript-item" :class="{ active: activeTranscriptId === item.id }" @click="activeTranscriptId = item.id"><span class="transcript-item-icon"><FileText :size="16" /></span><span class="transcript-item-copy"><strong>{{ item.title }}</strong><small><span class="transcript-source-tag">{{ item.sourceType === 'local' ? '本地' : 'B站' }}</span> {{ item.sourceType === 'local' ? '本地音频' : item.creator }} <i>·</i> {{ formatTranscriptDate(item.completedAt) }}</small></span><ChevronRight :size="15" class="transcript-item-arrow" /></button>
+              <button v-for="item in currentTranscriptFolder ? visibleFolderTranscripts : visibleUngroupedTranscripts" :key="item.id" class="transcript-item" :data-task-id="item.id" :class="{ active: activeTranscriptId === item.id }" @click="activeTranscriptId = item.id"><span class="transcript-item-icon"><FileText :size="16" /></span><span class="transcript-item-copy"><strong>{{ item.title }}</strong><small><span class="transcript-source-tag">{{ item.sourceType === 'local' ? '本地' : 'B站' }}</span> {{ item.sourceType === 'local' ? '本地音频' : item.creator }} <i>·</i> {{ formatTranscriptDate(item.completedAt) }}</small></span><ChevronRight :size="15" class="transcript-item-arrow" /></button>
               <div v-if="currentTranscriptFolder ? !visibleFolderTranscripts.length : !visibleTranscriptFolders.length && !visibleUngroupedTranscripts.length" class="empty-state transcript-no-results"><div class="empty-state-icon"><Search :size="15" /></div><strong>没有找到匹配的文字稿</strong><span>试试其他标题或文件夹名称。</span></div></div><div class="transcript-sidebar-foot"><span class="storage-icon"><HardDriveDownload :size="15" /></span><span>文字稿保存位置</span><button @click="page = 'settings'">查看设置<ChevronRight :size="13" /></button></div></aside>
             <article class="transcript-reader"><div class="reader-top"><div class="reader-breadcrumb"><FileText :size="15" /><span>文字稿</span><ChevronRight :size="13" /><strong>{{ activeTranscript.title }}</strong></div><div class="reader-actions"><button class="outline-button" @click="copyTranscript"><Copy :size="15" />复制全文</button><button class="outline-button" @click="openTaskLocation({ id: activeTranscript.id })"><FolderOpen :size="15" />打开位置</button><button class="primary-button export-button" @click="exportTranscript"><Download :size="15" />导出 TXT</button></div></div><div class="reader-document"><div class="document-type"><span>课程转写</span><span class="document-dot"></span><span>完整文字稿</span></div><h2>{{ activeTranscript.title }}</h2><div class="document-meta"><span><UserRound :size="14" />{{ activeTranscript.creator }}</span><span><CalendarIcon />{{ formatTranscriptDate(activeTranscript.completedAt) }}</span><span><Clock3 :size="14" />{{ activeTranscript.wordCount }} 字</span></div><div class="document-rule"></div><div class="transcript-body"><p v-for="(paragraph, index) in activeTranscript.text.split('\n\n')" :key="index">{{ paragraph }}</p></div><div class="document-end"><span></span><small>正文结束</small><span></span></div></div><div class="reader-footer"><span><ShieldCheck :size="14" />保留讲师原话 · 未做总结和改写</span><span>共 {{ activeTranscript.wordCount }} 字</span></div></article></div>
           <div v-else class="empty-state panel transcript-page-empty"><div class="empty-state-icon"><BookOpenText :size="19" /></div><strong>还没有文字稿</strong><span>完成一次转写后，文字稿会显示在这里。</span></div>

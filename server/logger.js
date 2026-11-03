@@ -3,7 +3,7 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
-const logDirectory = path.join(projectRoot, 'logs')
+const logDirectory = path.resolve(process.env.BILISCRIBE_LOG_DIR || path.join(projectRoot, 'logs'))
 const logFile = path.join(logDirectory, 'biliscribe.log')
 const maxBytes = 2 * 1024 * 1024
 const archiveCount = 3

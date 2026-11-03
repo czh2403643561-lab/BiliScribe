@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "node server/dev.js",
+    "test:local": "node server/dev.js --test-mode",
     "dev:ui": "vite --host 127.0.0.1",
     "dev:api": "node server/api.js",
     "build": "vite build",
