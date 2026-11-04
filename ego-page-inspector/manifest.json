@@ -1,0 +1,22 @@
+{
+  "manifest_version": 3,
+  "name": "Ego 页面结构探针（临时测试）",
+  "version": "0.1.0",
+  "description": "只读检查 Wikipedia 与 1688 页面的结构，供 Agent 验证浏览器扩展工作流。",
+  "host_permissions": [
+    "https://1688.com/*",
+    "https://*.1688.com/*",
+    "https://*.wikipedia.org/*"
+  ],
+  "content_scripts": [
+    {
+      "matches": [
+        "https://1688.com/*",
+        "https://*.1688.com/*",
+        "https://*.wikipedia.org/*"
+      ],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}
