@@ -28,3 +28,10 @@ test('reports bounded transcript excerpts and detects repeated fragments', () =>
   assert.ok(Array.from(diagnostics.first100Characters).length <= 100)
   assert.ok(Array.from(diagnostics.last300Characters).length <= 300)
 })
+
+test('flags a long loop but accepts varied transcript text', () => {
+  const loop = '讲师反复说明同一个格局判定条件及对应的行运规则。'.repeat(35)
+  const varied = Array.from({ length: 800 }, (_, index) => String.fromCharCode(0x4e00 + index)).join('')
+  assert.equal(analyzeTranscriptOutput(loop).repeatedOutput, true)
+  assert.equal(analyzeTranscriptOutput(varied).repeatedOutput, false)
+})

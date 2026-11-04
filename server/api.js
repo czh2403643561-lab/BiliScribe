@@ -1404,11 +1404,14 @@ async function callMiMoForSegmentUnlocked(task, prompt, filePath, index, count, 
   const extension = path.extname(filePath).toLowerCase()
   const mimeType = extension === '.m4a' ? 'audio/mp4' : 'audio/mpeg'
   const format = extension === '.m4a' ? 'm4a' : 'mp3'
+  const audioMinutes = (segment?.durationSeconds || audioDiagnostics.durationSeconds || 0) / 60
+  const characterLimit = Math.max(6000, Math.ceil(audioMinutes) * 500)
+  const completionTokenLimit = Math.min(32768, Math.max(8192, Math.ceil(audioMinutes) * 450))
   const body = {
     model: 'mimo-v2.6-flash',
     stream: true,
     stream_options: { include_usage: true },
-    max_completion_tokens: 131072,
+    max_completion_tokens: completionTokenLimit,
     thinking: { type: 'disabled' },
     messages: [
       { role: 'system', content: `${prompt}\n\n本次任务补充要求：请修正所附音频中的本段课程内容。只输出本段修正后的完整正文，不输出字数统计、标题、摘要、说明或其他内容。` },
@@ -1429,6 +1432,8 @@ async function callMiMoForSegmentUnlocked(task, prompt, filePath, index, count, 
     let streamReader
     let outputPath
     let characterCount = 0
+    let guardText = ''
+    let nextGuardAt = 1200
     let firstContentAt = null
     const requestStartedAt = Date.now()
     const expectedModel = 'mimo-v2.6-flash'
@@ -1516,6 +1521,17 @@ async function callMiMoForSegmentUnlocked(task, prompt, filePath, index, count, 
             }
             await outputHandle.write(content)
             characterCount += Array.from(content).length
+            guardText = (guardText + content).slice(-5000)
+            if (characterCount >= characterLimit || characterCount >= nextGuardAt) {
+              const guard = analyzeTranscriptOutput(guardText)
+              if (characterCount >= characterLimit || guard.repeatedOutput) {
+                controller.abort('repeated_output')
+                const error = transcriptFailure('mimo_repeated_output', 'MiMo 输出异常增长或重复，正在缩小当前音频段。')
+                error.generatedCharacterCount = characterCount
+                throw error
+              }
+              nextGuardAt = characterCount + 1000
+            }
             task.transcriptProgress = { ...(task.transcriptProgress || {}), generatedCharacters: characterCount }
             if (characterCount % 1000 < Array.from(content).length) saveLocalState()
           }
@@ -1580,6 +1596,9 @@ async function callMiMoForSegmentUnlocked(task, prompt, filePath, index, count, 
       }
       const text = cleanTranscriptText(rawOutput)
       if (!text) throw transcriptFailure('mimo_empty_response', 'MiMo 返回了空文字稿，请重试。')
+      if (outputDiagnostics.outputCharacterCount >= characterLimit || outputDiagnostics.repeatedOutput) {
+        throw transcriptFailure('mimo_repeated_output', 'MiMo 返回了异常增长或重复内容，正在缩小当前音频段。')
+      }
       log('info', 'MiMo transcript segment completed', {
         taskId: task.id, bvid: task.bvid, segment: index, model: responseModel,
         durationMs: Date.now() - requestStartedAt, timeToFirstContentMs: firstContentAt === null ? null : firstContentAt - requestStartedAt,
@@ -1898,12 +1917,13 @@ async function splitTranscriptSegment(task, ffmpegPath, workDirectory, segment, 
   const segmentDirectory = path.join(workDirectory, 'audio-segments')
   const inputPath = path.join(segmentDirectory, transcriptSegmentFilename(segment))
   const isContentFilterSplit = reasonCode === 'mimo_content_filtered'
+  const isRepeatedOutputSplit = reasonCode === 'mimo_repeated_output'
   const contentFilterSplitDepth = segment.contentFilterSplitDepth || 0
   const depthForPlan = isContentFilterSplit ? contentFilterSplitDepth : segment.splitDepth || 0
   const splitPlan = planAdaptiveTranscriptSplit(
     { ...segment, splitDepth: depthForPlan },
-    isContentFilterSplit ? transcriptMinimumContentFilterSegmentSeconds : transcriptMinimumAdaptiveSegmentSeconds,
-    isContentFilterSplit ? transcriptMaxContentFilterSplitDepth : transcriptMaxSplitDepth,
+    isContentFilterSplit ? transcriptMinimumContentFilterSegmentSeconds : isRepeatedOutputSplit ? 30 : transcriptMinimumAdaptiveSegmentSeconds,
+    isContentFilterSplit ? transcriptMaxContentFilterSplitDepth : isRepeatedOutputSplit ? 4 : transcriptMaxSplitDepth,
   )
   if (!splitPlan.canSplit) {
     if (isContentFilterSplit) {
@@ -1916,6 +1936,9 @@ async function splitTranscriptSegment(task, ffmpegPath, workDirectory, segment, 
     }
     if (reasonCode === 'mimo_repetition_truncation') {
       throw transcriptFailure('mimo_repetition_truncation_terminal', '该段音频质量较差，MiMo 多次检测到重复生成。已缩小片段仍无法稳定转写，请检查源音频。')
+    }
+    if (isRepeatedOutputSplit) {
+      throw transcriptFailure('mimo_repeated_output_terminal', 'MiMo 多次生成大量重复内容；已达到安全拆分下限，请检查该段音频。')
     }
     if (reasonCode === 'mimo_param_incorrect') {
       throw transcriptFailure('mimo_param_incorrect_terminal', formatParamIncorrectSplitLimitMessage(segment))
@@ -2267,6 +2290,7 @@ async function runTranscriptTask(task) {
         const failureReason = {
           mimo_content_filtered: 'content_filter',
           mimo_repetition_truncation: 'repetition_truncation',
+          mimo_repeated_output: 'repeated_output',
           mimo_output_truncated: 'length',
           mimo_param_incorrect: 'param_incorrect',
         }[reasonCode]
@@ -2279,6 +2303,7 @@ async function runTranscriptTask(task) {
           })
         }
         if (reasonCode === 'mimo_repetition_truncation') setTranscriptPhase(task, '检测到重复生成，正在缩小音频片段…')
+        if (reasonCode === 'mimo_repeated_output') setTranscriptPhase(task, '检测到输出重复，正在缩小音频片段…')
         if (reasonCode === 'mimo_param_incorrect') setTranscriptPhase(task, 'MiMo 拒绝当前音频片段，正在安全拆分…')
         if (reasonCode === 'mimo_content_filtered') {
           setTranscriptPhase(task, 'MiMo 安全过滤，正在拆分音频片段…')
@@ -2545,6 +2570,59 @@ async function createLocalAudioTasks(request, response) {
   log('info', 'Local audio transcript tasks created', { count: tasks.length })
   sendJson(response, 201, { tasks: tasks.map(publicTask) })
   void pumpDownloadQueue()
+}
+
+async function createAgentTranscriptTasks(request, response) {
+  const body = await readJsonBody(request, 2 * 1024 * 1024)
+  if (!Array.isArray(body.files) || !isValidLocalMediaBatchSize(body.files.length)) {
+    sendError(response, 400, 'invalid_agent_files', '请提供 1 到 3000 个本机音视频文件。')
+    return
+  }
+  const prepared = body.files.map((input) => {
+    const requestedPath = typeof input === 'string' ? input : input?.path
+    if (typeof requestedPath !== 'string' || !path.isAbsolute(requestedPath) || !isSupportedLocalMedia(requestedPath)) {
+      throw Object.assign(new Error('音视频必须是受支持格式的本机绝对路径。'), { statusCode: 400, code: 'invalid_agent_path' })
+    }
+    let sourcePath, stats
+    try {
+      sourcePath = fs.realpathSync(requestedPath)
+      stats = fs.statSync(sourcePath)
+    } catch {
+      throw Object.assign(new Error('找不到本机音视频文件。'), { statusCode: 400, code: 'agent_file_missing' })
+    }
+    if (!stats.isFile() || !stats.size) throw Object.assign(new Error('音视频文件为空或不是普通文件。'), { statusCode: 400, code: 'agent_file_invalid' })
+    const title = String((typeof input === 'object' && input?.title) || path.parse(sourcePath).name).trim().slice(0, 300)
+    const fingerprint = createHash('sha256').update(JSON.stringify([sourcePath.toLowerCase(), stats.size, stats.mtimeMs, title])).digest('hex')
+    return { sourcePath, stats, title, fingerprint }
+  })
+  const groupName = String(body.groupName || 'Agent转写').slice(0, 120)
+  const batchName = body.files.length > 1 ? String(body.batchName || groupName).slice(0, 120) : ''
+  const batchId = body.files.length > 1 ? randomUUID() : null
+  const tasks = []
+  let created = 0
+  for (const { sourcePath, stats, title, fingerprint } of prepared) {
+    const existing = [...downloadTasks.values()].find((task) => task.agentFingerprint === fingerprint)
+    if (existing) { tasks.push(existing); continue }
+    const task = {
+      id: randomUUID(), bvid: null, url: '', title, owner: '', creatorName: '', groupName,
+      batchId, batchName, agentFingerprint: fingerprint,
+      source: { type: 'local', path: sourcePath, originalName: path.basename(sourcePath), size: stats.size,
+        duration: null, mtimeMs: stats.mtimeMs, extension: path.extname(sourcePath).toLowerCase() },
+      mode: 'transcript', status: 'waiting', phase: '等待中', progress: null,
+      outputPath: '', outputDirectory: '', outputFiles: [], fileSize: 0, error: '',
+      createdAt: new Date().toISOString(), completedAt: null,
+      startedAt: null, endedAt: null, durationMs: null, attempt: 0,
+    }
+    downloadTasks.set(task.id, task)
+    tasks.push(task)
+    created += 1
+  }
+  if (created) {
+    saveLocalState()
+    log('info', 'Agent transcript tasks created', { created, reused: tasks.length - created })
+    void pumpDownloadQueue()
+  }
+  sendJson(response, created ? 201 : 200, { tasks: tasks.map(publicTask), created, reused: tasks.length - created })
 }
 
 async function saveDownloadDirectory(request, response) {
@@ -2907,6 +2985,9 @@ const server = http.createServer(async (request, response) => {
       statusCode = response.statusCode || 200
     } else if (method === 'POST' && pathname === '/api/local-audio/tasks') {
       await createLocalAudioTasks(request, response)
+      statusCode = response.statusCode || 200
+    } else if (method === 'POST' && pathname === '/api/agent/transcripts') {
+      await createAgentTranscriptTasks(request, response)
       statusCode = response.statusCode || 200
     } else if (method === 'GET' && pathname === '/api/transcripts') {
       await listTranscripts(response)

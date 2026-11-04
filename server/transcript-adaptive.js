@@ -1,6 +1,7 @@
 export function isAdaptiveTranscriptError(code) {
   return code === 'mimo_output_truncated'
     || code === 'mimo_repetition_truncation'
+    || code === 'mimo_repeated_output'
     || code === 'mimo_content_filtered'
     || code === 'mimo_param_incorrect'
 }

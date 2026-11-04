@@ -2,20 +2,18 @@
 
 ## 当前成果
 
-- BiliScribe 支持 B 站视频解析、批量任务、串行下载与 MiMo 文字稿；本地 MP3、M4A、WAV、FLAC、OGG、MP4 可通过同一转写流程处理。
-- 音视频使用 FFmpeg 规范化；任务专属 checkpoint 支持失败恢复，成功后保存 TXT 并清理该任务工作文件。
-- 新增技术交接文档 [`docs/TRANSCRIPTION_TECHNICAL_OVERVIEW.md`](docs/TRANSCRIPTION_TECHNICAL_OVERVIEW.md)，说明当前实现、已发现问题及未来 Codex Agent 直连本机处理服务的建议。
-- 隔离测试环境 `npm run test:local` 不读取正式 MiMo Key，以模拟文字稿验收页面流程；ego(lite) 已完成浏览器导入、处理、查看结果的冒烟验证。
+- 本机 Agent 转写入口：`node scripts/transcribe-local.mjs <绝对路径> [更多路径]`，通过 `POST /api/agent/transcripts` 复用原有队列、FFmpeg、八字命理提示词和 checkpoint；MP4 先提取音轨。
+- 按文件路径、大小、修改时间和标题复用已提交任务，避免重复提交造成额外调用。
+- MiMo 流式输出增加重复片段与异常字数熔断；异常时仅细分失败段，最终保存前再次检查。
+- 真实转写：5 分 55 秒 MP3 得到 956 字；64 分 34 秒 MP3 得到 14,498 字，约 213 秒完成，`finish_reason=stop`，重复分数为 0。两份 TXT 位于 `C:\Users\Atlas\Videos\BiliScribe\本地导入\Agent转写\`。
 
-## 当前验证与限制
+## 验证与限制
 
-- 上一轮代码验证：语法检查、前端构建、`git diff --check` 通过；相关 Node 测试 24 项通过。
-- 测试环境地址为 `http://127.0.0.1:5174/`，后台端口 4175；不产生 MiMo API 费用。真实 MiMo 转写、真实 B 站下载及 75 个真实任务的压力验收未完成。
-- 当前本地转写任务创建依赖 Windows 文件选择器产生的短时 selectionId，尚无面向 Agent 的无界面路径导入接口。
-- Ego 自定义扩展的全自动安装/调用验证仍受 Ego 未开放的扩展 API 限制；CrawlHub 未改。
-- Ego 页面解析和扩展能力交接文档见 `EGO_BROWSER_WORKFLOW_HANDOFF.md`，含 CLI、Skill、探针源码地址及新项目复制方式。
+- 相关 Node 测试 25 项、语法检查、`git diff --check` 通过；同一短文件再次提交复用原任务。
+- 长样本未触发熔断；实际异常生成场景仍需后续观察。输出字数阈值是防失控保护，不能代替人工审稿。
+- 真实验收使用独立端口 4188；现有 4174 后台在代码更新前启动，需重启后才会提供新 Agent 接口。
+- Ego 自定义扩展自动安装仍未验证，见 `EGO_BROWSER_WORKFLOW_HANDOFF.md`。
 
 ## 下一步
 
-- 如决定让 Codex Agent 无网页操作，增加复用现有串行队列与转写执行器的本机 CLI 或 Agent 适配层，并加入重复提交保护。
-- 若需验证真实 B 站或 MiMo 流程，需使用正式环境；真实 MiMo 请求会产生 API 费用。
+- 用户查看短、长两份 TXT 的质量；确认后再封装“腾讯会议下载 / 本机音视频转写”的统一入口 Skill。

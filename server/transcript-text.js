@@ -32,6 +32,7 @@ export function analyzeTranscriptOutput(value) {
     first100Characters: characters.slice(0, 100).join(''),
     last300Characters: characters.slice(-300).join(''),
     repetitionScore: points.length ? Math.min(1, repeatedCharacters / points.length) : 0,
+    repeatedOutput: points.length >= 600 && repeatedCharacters / points.length >= 0.35,
     repeatedFragmentSample: repeatedFragmentSample.slice(0, 200),
   }
 }

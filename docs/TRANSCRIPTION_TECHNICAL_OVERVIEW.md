@@ -60,6 +60,7 @@ flowchart LR
 - Prompt 从 `prompts/bazi-transcript.md` 读取，并由后台补充“只返回本段正文、按原顺序”的任务说明。
 - API Key 从本机 BiliScribe 状态目录的 `secrets.json` 载入；不会返回给前端，也不应交给 Codex 对话。
 - 后台按 SSE 逐块写入任务专属的临时输出文件。只有模型符合预期、`finish_reason` 为 `stop` 且文本非空时，才把该段标记成功。
+- 小米[官方音频输入文档](https://mimo.mi.com/docs/en-US/quick-start/usage-guide/multimodal-understanding/audio-understanding)确认 V2.6 Flash 支持 Base64 音频，单段 Base64 上限为 50 MB；本项目保留 40 MB 安全上限。现有八字命理 Prompt 保持不变。
 
 请求入口为 `callMiMoForSegment()`。网络中断、超时和部分无效响应最多尝试三次；HTTP 429 与 5xx 有退避重试。普通 HTTP 400 不会一概自动重试。
 
@@ -70,7 +71,7 @@ const body = {
   model: 'mimo-v2.6-flash',
   stream: true,
   stream_options: { include_usage: true },
-  max_completion_tokens: 131072,
+  max_completion_tokens: completionTokenLimit, // 按音频时长计算，上限 32768
   thinking: { type: 'disabled' },
   messages: [
     { role: 'system', content: `${prompt}\n\n只返回本段修正后的完整正文。` },
@@ -106,7 +107,7 @@ checkpoint 保存输入指纹、源音频哈希、Prompt 哈希、处理版本�
 2. **Windows 可能仍运行旧后台。** GitHub 更新或前端重建，不代表 4174 端口服务已换成新代码。排查时应确认当前仓库 HEAD、监听端口 PID、Node 启动命令和实际 `server/api.js` 路径；只停止已确认属于 BiliScribe 的进程。
 3. **长音频出现过 HTTP 400 / `Param Incorrect`。** 约 152 分钟视频被初步处理成两个约 76 分钟片段，其中一段得到服务端 `Param Incorrect`。这个观测本身不能证明“音频长度就是原因”，所以错误处理按服务端消息精确识别；不能把所有 400 都当成长度问题。
 4. **FFmpeg 自动分段器未稳定生成恰好两个子片段。** 4570.048 秒段的旧拆分曾失败。现在按明确起点与持续时间分别生成两段，并检查数量、时长、大小和音轨后才提交 checkpoint。
-5. **异常生成量会误导进度判断。** 曾看到运行中显示约 133,875 个“已生成字”。它是尚未保存的模型输出字符进度，不等于最终 TXT 字数或汉字数。应同时看 `finish_reason`、usage、输出首尾和重复片段诊断；发生重复或截断时只把成功完成的段保留。当前重复率指标用于诊断；拆分触发依赖 MiMo 的 `finish_reason`，并非任何高重复文本都会自动被拦截。
+5. **异常生成量会误导进度判断。** 曾看到运行中显示约 133,875 个“已生成字”。它是尚未保存的模型输出字符进度，不等于最终 TXT 字数或汉字数。现在每约 1000 字检查最近 5000 字的重复率，并按音频分钟数设置生成字数与 token 上限；异常时立即停止当前请求，只拆分该音频段重试。最终返回后仍再次检查重复内容。阈值是防失控保护，不能替代人工核对转写质量。
 6. **HTTP 错误日志之前只有通用状态码。** 当前读取最多 8 KiB 错误响应、最多等待 2 秒，记录经过清理的服务端 code/type/message 和 request ID，不记录 Key、音频 Base64、Authorization、Prompt 或原始请求体。日志中的输出诊断仍可能包含少量文字稿片段，分享日志前应检查并脱敏。
 
 一次拆分失败或模型异常时，先保留原媒体、checkpoint 和工作目录，再根据 `taskId` 找到日志中的输入诊断、HTTP 错误、`Transcript adaptive split planned/failed/verified` 与分段完成记录。不要先删临时文件或重建任务，否则可能丢失已完成段并增加重复 API 费用。
@@ -115,9 +116,9 @@ checkpoint 保存输入指纹、源音频哈希、Prompt 哈希、处理版本�
 
 推荐第一步让 Agent 调用**本机 BiliScribe 转写服务**，而不是让 Agent 自己重新拼一套 MiMo 请求。这样 API Key 继续留在后台本机配置里，FFmpeg、Prompt、分段、串行队列和 checkpoint 也继续复用。
 
-当前后端已经提供任务与文字稿查询接口（`GET /api/tasks`、`GET /api/transcripts`），但本地任务创建依赖 Windows 原生选择器生成的短时 `selectionId`；选择器本身会弹窗。因此这不是完整的无界面 Agent 接口。测试模式的上传接口也只用于隔离验收，不能当作正式任务入口。
+现在可用 `node scripts/transcribe-local.mjs <本机音视频绝对路径> [更多路径]` 提交任务并等待 TXT，支持 MP3、M4A、WAV、FLAC、OGG、MP4。它调用只绑定本机的 `POST /api/agent/transcripts`，复用原有队列、Prompt、FFmpeg 和 checkpoint。相同文件、修改时间和标题再次提交时返回原任务，避免重复收费；失败任务使用现有任务重试接口。运行前需启动当前代码版本的本机后台，默认端口为 4174，可用 `BILISCRIBE_API_PORT` 指向其他端口。
 
-后续最小演进可以增加一个本机 CLI 或仅绑定 `127.0.0.1` 的 Agent 适配层：接收本机媒体路径、任务标题和可选批次名，验证路径/格式/音轨后，把任务送进**现有同一个串行队列**；返回稳定 `taskId`，供 Agent 轮询进度、读取失败原因、重试/取消并取得 TXT。Agent 适配层不保存或打印 MiMo Key，不允许删除输入媒体，并应加入幂等标识，避免 Agent 重试提交时意外创建第二个收费任务。新增入口应复用 `runTranscriptTask()` 的处理链，不能复制一份 Prompt/API/拆分实现。
+Agent 入口不保存或打印 MiMo Key，也不修改输入媒体。MP4 进入队列后先由 FFmpeg 提取首条音轨，再走同一转写流程。Agent 可通过已有任务接口查看、重试或取消任务；统一入口 Skill 应只负责识别“下载”与“转文字稿”意图并调用现有工具。
 
 如果以后完全移除网页，建议把“任务队列 + 转写执行器”整理成后台共用能力，由网页和 Agent CLI/MCP 作为两个薄客户端。第一阶段可先保留网页作为人工控制台；Agent 能力稳定后再决定是否移除网页。直接让 Codex 把媒体转成 Base64 并调用 MiMo，会要求 Agent 侧额外管理 Key 和整个恢复过程，也容易造成与当前流程参数、分段和错误处理不一致。当前后台绑定 `127.0.0.1`；未来的 Agent 入口也应保持本机可达，不要直接暴露到公网。
 
