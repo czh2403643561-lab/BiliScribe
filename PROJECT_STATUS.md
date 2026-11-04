@@ -13,6 +13,7 @@
 - 测试环境地址为 `http://127.0.0.1:5174/`，后台端口 4175；不产生 MiMo API 费用。真实 MiMo 转写、真实 B 站下载及 75 个真实任务的压力验收未完成。
 - 当前本地转写任务创建依赖 Windows 文件选择器产生的短时 selectionId，尚无面向 Agent 的无界面路径导入接口。
 - Ego 自定义扩展的全自动安装/调用验证仍受 Ego 未开放的扩展 API 限制；CrawlHub 未改。
+- Ego 页面解析和扩展能力交接文档见 `EGO_BROWSER_WORKFLOW_HANDOFF.md`，含 CLI、Skill、探针源码地址及新项目复制方式。
 
 ## 下一步
 
