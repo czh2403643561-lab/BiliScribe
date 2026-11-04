@@ -10,7 +10,7 @@ const base = `http://127.0.0.1:${process.env.BILISCRIBE_API_PORT || 4174}`
 async function request(path, options) {
   const response = await fetch(`${base}${path}`, options)
   const body = await response.json()
-  if (!response.ok) throw new Error(body.message || body.error || `HTTP ${response.status}`)
+  if (!response.ok) throw new Error(body.message || body.error?.message || (typeof body.error === 'string' ? body.error : '') || `HTTP ${response.status}`)
   return body
 }
 
